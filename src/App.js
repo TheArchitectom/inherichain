@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+/* eslint-disable no-unused-vars */
+import React, { useState, useEffect, useRef } from 'react';
 
 // ============================================
 // INHERICHAIN - Digital Crypto Inheritance
@@ -62,7 +63,7 @@ const NeuralNebula = () => {
     const ctx = canvas.getContext('2d');
     let animationId;
     let particles = [];
-    let connections = [];
+    
     let time = 0;
     
     const resize = () => {
