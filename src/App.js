@@ -306,124 +306,152 @@ const Card = ({ children, style, glow, onClick }) => (
   </div>
 );
 
-const Input = ({ label, type = 'text', value, onChange, placeholder, textarea, disabled, style }) => (
-  <div style={{ marginBottom: '24px', ...style }}>
-    {label && (
-      <label style={{
-        display: 'block',
-        fontSize: '11px',
-        color: 'rgba(167, 139, 250, 0.8)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.15em',
-        marginBottom: '10px',
-        fontWeight: 600,
+const Input = ({ label, type = 'text', value, onChange, placeholder, textarea, disabled, style }) => {
+  const [isFocused, setIsFocused] = useState(false);
+  
+  return (
+    <div style={{ marginBottom: '24px', ...style }}>
+      {label && (
+        <label style={{
+          display: 'block',
+          fontSize: '11px',
+          color: 'rgba(167, 139, 250, 0.8)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.15em',
+          marginBottom: '10px',
+          fontWeight: 600,
+        }}>
+          {label}
+        </label>
+      )}
+      <div style={{
+        position: 'relative',
+        borderRadius: '14px',
+        padding: '2px',
+        background: isFocused 
+          ? 'linear-gradient(90deg, #8b5cf6, #06b6d4, #f472b6, #fbbf24, #8b5cf6)' 
+          : 'transparent',
+        backgroundSize: '200% 100%',
+        animation: isFocused ? 'gradientFlow 2s linear infinite' : 'none',
       }}>
-        {label}
-      </label>
-    )}
-    {textarea ? (
-      <textarea
-        value={value}
-        onChange={onChange}
-        placeholder={placeholder}
-        disabled={disabled}
-        rows={4}
-        style={{
-          width: '100%',
-          padding: '16px 20px',
-          background: 'rgba(0,0,0,0.4)',
-          border: '1px solid rgba(139, 92, 246, 0.2)',
-          borderRadius: '12px',
-          color: '#fff',
-          fontSize: '14px',
-          fontFamily: "'Inter', -apple-system, sans-serif",
-          outline: 'none',
-          resize: 'vertical',
-          boxSizing: 'border-box',
-          transition: 'all 0.2s ease',
-        }}
-        onFocus={(e) => {
-          e.target.style.borderColor = 'rgba(139, 92, 246, 0.5)';
-          e.target.style.boxShadow = '0 0 20px rgba(139, 92, 246, 0.1)';
-        }}
-        onBlur={(e) => {
-          e.target.style.borderColor = 'rgba(139, 92, 246, 0.2)';
-          e.target.style.boxShadow = 'none';
-        }}
-      />
-    ) : (
-      <input
-        type={type}
-        value={value}
-        onChange={onChange}
-        placeholder={placeholder}
-        disabled={disabled}
-        style={{
-          width: '100%',
-          padding: '16px 20px',
-          background: 'rgba(0,0,0,0.4)',
-          border: '1px solid rgba(139, 92, 246, 0.2)',
-          borderRadius: '12px',
-          color: '#fff',
-          fontSize: '14px',
-          fontFamily: "'Inter', -apple-system, sans-serif",
-          outline: 'none',
-          boxSizing: 'border-box',
-          transition: 'all 0.2s ease',
-        }}
-        onFocus={(e) => {
-          e.target.style.borderColor = 'rgba(139, 92, 246, 0.5)';
-          e.target.style.boxShadow = '0 0 20px rgba(139, 92, 246, 0.1)';
-        }}
-        onBlur={(e) => {
-          e.target.style.borderColor = 'rgba(139, 92, 246, 0.2)';
-          e.target.style.boxShadow = 'none';
-        }}
-      />
-    )}
-  </div>
-);
+        <style>
+          {`
+            @keyframes gradientFlow {
+              0% { background-position: 0% 50%; }
+              100% { background-position: 200% 50%; }
+            }
+          `}
+        </style>
+        {textarea ? (
+          <textarea
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            disabled={disabled}
+            rows={4}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            style={{
+              width: '100%',
+              padding: '16px 20px',
+              background: '#0a0a0f',
+              border: 'none',
+              borderRadius: '12px',
+              color: '#fff',
+              fontSize: '14px',
+              fontFamily: "'Inter', -apple-system, sans-serif",
+              outline: 'none',
+              resize: 'vertical',
+              boxSizing: 'border-box',
+              transition: 'all 0.2s ease',
+            }}
+          />
+        ) : (
+          <input
+            type={type}
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            disabled={disabled}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            style={{
+              width: '100%',
+              padding: '16px 20px',
+              background: '#0a0a0f',
+              border: 'none',
+              borderRadius: '12px',
+              color: '#fff',
+              fontSize: '14px',
+              fontFamily: "'Inter', -apple-system, sans-serif",
+              outline: 'none',
+              boxSizing: 'border-box',
+              transition: 'all 0.2s ease',
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
 
-const Select = ({ label, value, onChange, options, style }) => (
-  <div style={{ marginBottom: '24px', ...style }}>
-    {label && (
-      <label style={{
-        display: 'block',
-        fontSize: '11px',
-        color: 'rgba(167, 139, 250, 0.8)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.15em',
-        marginBottom: '10px',
-        fontWeight: 600,
+const Select = ({ label, value, onChange, options, style }) => {
+  const [isFocused, setIsFocused] = useState(false);
+  
+  return (
+    <div style={{ marginBottom: '24px', ...style }}>
+      {label && (
+        <label style={{
+          display: 'block',
+          fontSize: '11px',
+          color: 'rgba(167, 139, 250, 0.8)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.15em',
+          marginBottom: '10px',
+          fontWeight: 600,
+        }}>
+          {label}
+        </label>
+      )}
+      <div style={{
+        position: 'relative',
+        borderRadius: '14px',
+        padding: '2px',
+        background: isFocused 
+          ? 'linear-gradient(90deg, #8b5cf6, #06b6d4, #f472b6, #fbbf24, #8b5cf6)' 
+          : 'transparent',
+        backgroundSize: '200% 100%',
+        animation: isFocused ? 'gradientFlow 2s linear infinite' : 'none',
       }}>
-        {label}
-      </label>
-    )}
-    <select
-      value={value}
-      onChange={onChange}
-      style={{
-        width: '100%',
-        padding: '16px 20px',
-        background: 'rgba(0,0,0,0.4)',
-        border: '1px solid rgba(139, 92, 246, 0.2)',
-        borderRadius: '12px',
-        color: '#fff',
-        fontSize: '14px',
-        fontFamily: "'Inter', -apple-system, sans-serif",
-        outline: 'none',
-        boxSizing: 'border-box',
-        cursor: 'pointer',
-      }}
-    >
-      {options.map(opt => (
-        <option key={opt.value} value={opt.value} style={{ background: '#0f0a1a' }}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
-  </div>
-);
+        <select
+          value={value}
+          onChange={onChange}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          style={{
+            width: '100%',
+            padding: '16px 20px',
+            background: '#0a0a0f',
+            border: 'none',
+            borderRadius: '12px',
+            color: '#fff',
+            fontSize: '14px',
+            fontFamily: "'Inter', -apple-system, sans-serif",
+            outline: 'none',
+            boxSizing: 'border-box',
+            cursor: 'pointer',
+          }}
+        >
+          {options.map(opt => (
+            <option key={opt.value} value={opt.value} style={{ background: '#0f0a1a' }}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+};
 
 const StatusBadge = ({ status }) => {
   const configs = {
