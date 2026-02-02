@@ -1,1702 +1,590 @@
-/* eslint-disable no-unused-vars */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 // ============================================
-// INHERICHAIN - Digital Crypto Inheritance
-// Your Keys. Your Rules. Your Legacy.
+// INHERICHAIN v3 - Complete Digital Legacy Platform
+// With Account System, Persistence, 2FA/3FA, Stripe
 // ============================================
 
-// Client-side encryption utilities (AES-256-GCM)
+const STRIPE_PAYMENT_LINK = 'https://buy.stripe.com/7sY3cw2x61nq9tQ17q9Zm00';
+const PLATFORM_FEE_PERCENT = 5;
+const STORAGE_KEY = 'inherichain_accounts';
+const SESSION_KEY = 'inherichain_session';
+
+// ============================================
+// CRYPTO UTILITIES - AES-256 Encryption
+// ============================================
 const CryptoUtils = {
   async deriveKey(password, salt) {
-    const encoder = new TextEncoder();
-    const keyMaterial = await window.crypto.subtle.importKey(
-      'raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits', 'deriveKey']
-    );
-    return await window.crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt: encoder.encode(salt), iterations: 100000, hash: 'SHA-256' },
-      keyMaterial, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']
-    );
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits', 'deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: enc.encode(salt), iterations: 100000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
   },
   async encrypt(data, password) {
-    const salt = window.crypto.getRandomValues(new Uint8Array(16));
-    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
     const key = await this.deriveKey(password, String.fromCharCode(...salt));
-    const encrypted = await window.crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(data))
-    );
+    const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(data)));
     return { salt: Array.from(salt), iv: Array.from(iv), data: Array.from(new Uint8Array(encrypted)) };
   },
-  async decrypt(encryptedObj, password) {
-    try {
-      const key = await this.deriveKey(password, String.fromCharCode(...new Uint8Array(encryptedObj.salt)));
-      const decrypted = await window.crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: new Uint8Array(encryptedObj.iv) }, key, new Uint8Array(encryptedObj.data)
-      );
-      return JSON.parse(new TextDecoder().decode(decrypted));
-    } catch (e) { throw new Error('Decryption failed - incorrect password'); }
+  async decrypt(obj, password) {
+    const key = await this.deriveKey(password, String.fromCharCode(...new Uint8Array(obj.salt)));
+    const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(obj.iv) }, key, new Uint8Array(obj.data));
+    return JSON.parse(new TextDecoder().decode(dec));
+  },
+  genId: () => 'xxxx-xxxx'.replace(/x/g, () => Math.floor(Math.random() * 16).toString(16)),
+  genTOTPSecret: () => { let s = ''; for (let i = 0; i < 32; i++) s += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[Math.floor(Math.random() * 32)]; return s; },
+  genBackupCodes: () => Array.from({ length: 8 }, () => Math.random().toString(36).slice(2, 8).toUpperCase()),
+  verifyTOTP(secret, code) {
+    for (let i = -1; i <= 1; i++) {
+      const counter = Math.floor((Date.now() / 1000 + i * 30) / 30);
+      const hash = (secret + counter).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0);
+      if (Math.abs(hash % 1000000).toString().padStart(6, '0') === code) return true;
+    }
+    return false;
   }
 };
 
-// Chain configurations
+// ============================================
+// STORAGE SERVICE - LocalStorage Persistence
+// ============================================
+const Storage = {
+  getAccounts: () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch { return {}; } },
+  saveAccounts: (a) => localStorage.setItem(STORAGE_KEY, JSON.stringify(a)),
+  getAccount: (email) => Storage.getAccounts()[email?.toLowerCase()],
+  saveAccount: (email, data) => { const a = Storage.getAccounts(); a[email.toLowerCase()] = data; Storage.saveAccounts(a); },
+  getSession: () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch { return null; } },
+  saveSession: (s) => sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)),
+  clearSession: () => sessionStorage.removeItem(SESSION_KEY)
+};
+
 const CHAINS = [
-  { value: 'ETH', label: 'Ethereum', icon: '⟠', color: '#627eea' },
-  { value: 'BTC', label: 'Bitcoin', icon: '₿', color: '#f7931a' },
-  { value: 'SOL', label: 'Solana', icon: '◎', color: '#00ffa3' },
-  { value: 'LINK', label: 'Chainlink', icon: '⬡', color: '#375bd2' },
-  { value: 'QNT', label: 'Quant', icon: '◈', color: '#585858' },
-  { value: 'TAO', label: 'Bittensor', icon: 'τ', color: '#000' },
-  { value: 'KAS', label: 'Kaspa', icon: '⧫', color: '#49eacb' },
-  { value: 'MATIC', label: 'Polygon', icon: '⬡', color: '#8247e5' },
+  { value: 'ETH', label: 'Ethereum', icon: '⟠' }, { value: 'BTC', label: 'Bitcoin', icon: '₿' },
+  { value: 'SOL', label: 'Solana', icon: '◎' }, { value: 'LINK', label: 'Chainlink', icon: '⬡' },
+  { value: 'QNT', label: 'Quant', icon: '◈' }, { value: 'TAO', label: 'Bittensor', icon: 'τ' },
+  { value: 'KAS', label: 'Kaspa', icon: '⧫' }, { value: 'MATIC', label: 'Polygon', icon: '⬡' },
 ];
 
-const PRICES = { ETH: 3200, BTC: 97000, SOL: 210, LINK: 28, QNT: 145, TAO: 480, KAS: 0.15, MATIC: 0.52 };
-
 // ============================================
-// NEURAL NEBULA BACKGROUND
+// BACKGROUND ANIMATION
 // ============================================
-const NeuralNebula = () => {
-  const canvasRef = useRef(null);
-  
+const Background = () => {
+  const ref = useRef();
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    let animationId;
-    let particles = [];
-    
-    let time = 0;
-    
-    const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
-    resize();
-    window.addEventListener('resize', resize);
-    
-    // Create particles (neural nodes)
-    for (let i = 0; i < 60; i++) {
-      particles.push({
-        x: Math.random() * canvas.width,
-        y: Math.random() * canvas.height,
-        vx: (Math.random() - 0.5) * 0.3,
-        vy: (Math.random() - 0.5) * 0.3,
-        radius: Math.random() * 2 + 1,
-        color: ['#8b5cf6', '#06b6d4', '#f472b6', '#a78bfa', '#22d3ee'][Math.floor(Math.random() * 5)],
-        pulse: Math.random() * Math.PI * 2,
-      });
-    }
-    
+    const c = ref.current, ctx = c.getContext('2d');
+    let id, particles = [], t = 0;
+    const resize = () => { c.width = window.innerWidth; c.height = window.innerHeight; };
+    resize(); window.addEventListener('resize', resize);
+    for (let i = 0; i < 40; i++) particles.push({ x: Math.random() * c.width, y: Math.random() * c.height, vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3, r: Math.random() * 2 + 1, color: ['#8b5cf6', '#06b6d4', '#f472b6'][i % 3] });
     const animate = () => {
-      time += 0.005;
-      ctx.fillStyle = 'rgba(10, 10, 15, 0.1)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw nebula clouds
-      const gradient1 = ctx.createRadialGradient(
-        canvas.width * 0.3 + Math.sin(time) * 100, 
-        canvas.height * 0.4 + Math.cos(time * 0.7) * 80, 
-        0,
-        canvas.width * 0.3, canvas.height * 0.4, 400
-      );
-      gradient1.addColorStop(0, 'rgba(139, 92, 246, 0.08)');
-      gradient1.addColorStop(0.5, 'rgba(139, 92, 246, 0.03)');
-      gradient1.addColorStop(1, 'transparent');
-      ctx.fillStyle = gradient1;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      const gradient2 = ctx.createRadialGradient(
-        canvas.width * 0.7 + Math.cos(time * 0.8) * 120, 
-        canvas.height * 0.6 + Math.sin(time * 0.6) * 100, 
-        0,
-        canvas.width * 0.7, canvas.height * 0.6, 350
-      );
-      gradient2.addColorStop(0, 'rgba(6, 182, 212, 0.07)');
-      gradient2.addColorStop(0.5, 'rgba(6, 182, 212, 0.02)');
-      gradient2.addColorStop(1, 'transparent');
-      ctx.fillStyle = gradient2;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      const gradient3 = ctx.createRadialGradient(
-        canvas.width * 0.5 + Math.sin(time * 1.2) * 80, 
-        canvas.height * 0.3 + Math.cos(time) * 60, 
-        0,
-        canvas.width * 0.5, canvas.height * 0.3, 300
-      );
-      gradient3.addColorStop(0, 'rgba(244, 114, 182, 0.06)');
-      gradient3.addColorStop(0.5, 'rgba(244, 114, 182, 0.02)');
-      gradient3.addColorStop(1, 'transparent');
-      ctx.fillStyle = gradient3;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      // Update and draw particles
+      t += 0.005; ctx.fillStyle = 'rgba(10,10,15,0.15)'; ctx.fillRect(0, 0, c.width, c.height);
       particles.forEach((p, i) => {
-        p.x += p.vx;
-        p.y += p.vy;
-        p.pulse += 0.02;
-        
-        // Wrap around edges
-        if (p.x < 0) p.x = canvas.width;
-        if (p.x > canvas.width) p.x = 0;
-        if (p.y < 0) p.y = canvas.height;
-        if (p.y > canvas.height) p.y = 0;
-        
-        // Draw connections (neural synapses)
-        particles.forEach((p2, j) => {
-          if (i >= j) return;
-          const dx = p.x - p2.x;
-          const dy = p.y - p2.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          
-          if (dist < 150) {
-            const alpha = (1 - dist / 150) * 0.15;
-            ctx.beginPath();
-            ctx.strokeStyle = `rgba(139, 92, 246, ${alpha})`;
-            ctx.lineWidth = 0.5;
-            ctx.moveTo(p.x, p.y);
-            ctx.lineTo(p2.x, p2.y);
-            ctx.stroke();
-          }
-        });
-        
-        // Draw particle with pulse
-        const pulseSize = p.radius + Math.sin(p.pulse) * 0.5;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, pulseSize, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.fill();
-        
-        // Glow effect
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, pulseSize * 3, 0, Math.PI * 2);
-        const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, pulseSize * 3);
-        glow.addColorStop(0, p.color + '40');
-        glow.addColorStop(1, 'transparent');
-        ctx.fillStyle = glow;
-        ctx.fill();
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0) p.x = c.width; if (p.x > c.width) p.x = 0;
+        if (p.y < 0) p.y = c.height; if (p.y > c.height) p.y = 0;
+        particles.forEach((p2, j) => { if (i < j) { const d = Math.hypot(p.x - p2.x, p.y - p2.y); if (d < 120) { ctx.beginPath(); ctx.strokeStyle = `rgba(139,92,246,${(1 - d / 120) * 0.15})`; ctx.moveTo(p.x, p.y); ctx.lineTo(p2.x, p2.y); ctx.stroke(); } } });
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = p.color; ctx.fill();
       });
-      
-      animationId = requestAnimationFrame(animate);
+      id = requestAnimationFrame(animate);
     };
-    
     animate();
-    
-    return () => {
-      window.removeEventListener('resize', resize);
-      cancelAnimationFrame(animationId);
-    };
+    return () => { window.removeEventListener('resize', resize); cancelAnimationFrame(id); };
   }, []);
-  
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        width: '100%',
-        height: '100%',
-        zIndex: 0,
-        background: 'linear-gradient(135deg, #0a0a0f 0%, #0f0a1a 50%, #0a0f1a 100%)',
-      }}
-    />
-  );
+  return <canvas ref={ref} style={{ position: 'fixed', inset: 0, zIndex: 0, background: 'linear-gradient(135deg,#0a0a0f,#0f0a1a,#0a0f1a)' }} />;
 };
 
 // ============================================
 // UI COMPONENTS
 // ============================================
-
 const Button = ({ children, onClick, variant = 'primary', size = 'md', disabled, fullWidth, style }) => {
-  const [hover, setHover] = useState(false);
-  
-  const variants = {
-    primary: {
-      background: hover 
-        ? 'linear-gradient(135deg, #a78bfa 0%, #8b5cf6 50%, #06b6d4 100%)'
-        : 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #06b6d4 100%)',
-      color: '#fff',
-      boxShadow: hover 
-        ? '0 8px 40px rgba(139, 92, 246, 0.5), 0 0 60px rgba(6, 182, 212, 0.2)'
-        : '0 4px 20px rgba(139, 92, 246, 0.3)',
-    },
-    secondary: {
-      background: hover ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)',
-      color: '#fff',
-      border: '1px solid rgba(139, 92, 246, 0.3)',
-    },
-    danger: {
-      background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-      color: '#fff',
-      boxShadow: hover ? '0 8px 40px rgba(239, 68, 68, 0.4)' : '0 4px 20px rgba(239, 68, 68, 0.2)',
-    },
-    success: {
-      background: 'linear-gradient(135deg, #10b981 0%, #06b6d4 100%)',
-      color: '#fff',
-      boxShadow: hover ? '0 8px 40px rgba(16, 185, 129, 0.5)' : '0 4px 20px rgba(16, 185, 129, 0.3)',
-    },
-    ghost: {
-      background: 'transparent',
-      color: hover ? '#a78bfa' : 'rgba(255,255,255,0.6)',
-    }
+  const [h, setH] = useState(false);
+  const vars = {
+    primary: { background: h ? 'linear-gradient(135deg,#a78bfa,#8b5cf6,#06b6d4)' : 'linear-gradient(135deg,#8b5cf6,#7c3aed,#06b6d4)', color: '#fff', boxShadow: h ? '0 8px 40px rgba(139,92,246,0.5)' : '0 4px 20px rgba(139,92,246,0.3)' },
+    secondary: { background: h ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)', color: '#fff', border: '1px solid rgba(139,92,246,0.3)' },
+    danger: { background: 'linear-gradient(135deg,#ef4444,#dc2626)', color: '#fff' },
+    success: { background: 'linear-gradient(135deg,#10b981,#06b6d4)', color: '#fff' },
+    ghost: { background: 'transparent', color: h ? '#a78bfa' : 'rgba(255,255,255,0.6)' }
   };
-  
-  const sizes = {
-    sm: { padding: '10px 20px', fontSize: '11px' },
-    md: { padding: '14px 28px', fontSize: '12px' },
-    lg: { padding: '18px 36px', fontSize: '14px' },
-  };
-  
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        fontFamily: "'Inter', -apple-system, sans-serif",
-        fontWeight: 600,
-        letterSpacing: '0.05em',
-        textTransform: 'uppercase',
-        border: 'none',
-        borderRadius: '12px',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-        opacity: disabled ? 0.5 : 1,
-        transform: hover && !disabled ? 'translateY(-2px)' : 'translateY(0)',
-        width: fullWidth ? '100%' : 'auto',
-        ...variants[variant],
-        ...sizes[size],
-        ...style,
-      }}
-    >
-      {children}
-    </button>
-  );
+  const sizes = { sm: { padding: '8px 16px', fontSize: '11px' }, md: { padding: '14px 28px', fontSize: '12px' }, lg: { padding: '18px 36px', fontSize: '14px' } };
+  return <button onClick={onClick} disabled={disabled} onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)} style={{ fontFamily: 'Inter,sans-serif', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', border: 'none', borderRadius: '12px', cursor: disabled ? 'not-allowed' : 'pointer', transition: 'all 0.3s', opacity: disabled ? 0.5 : 1, transform: h && !disabled ? 'translateY(-2px)' : 'none', width: fullWidth ? '100%' : 'auto', ...vars[variant], ...sizes[size], ...style }}>{children}</button>;
 };
 
-const Card = ({ children, style, glow, onClick }) => (
-  <div
-    onClick={onClick}
-    style={{
-      background: 'linear-gradient(135deg, rgba(15, 10, 25, 0.85) 0%, rgba(10, 15, 25, 0.9) 100%)',
-      backdropFilter: 'blur(20px)',
-      WebkitBackdropFilter: 'blur(20px)',
-      borderRadius: '24px',
-      border: '1px solid rgba(139, 92, 246, 0.1)',
-      padding: '32px',
-      position: 'relative',
-      overflow: 'hidden',
-      boxShadow: glow 
-        ? `0 0 80px ${glow}20, 0 20px 60px rgba(0,0,0,0.4)`
-        : '0 20px 60px rgba(0,0,0,0.3)',
-      cursor: onClick ? 'pointer' : 'default',
-      transition: 'all 0.3s ease',
-      ...style,
-    }}
-  >
-    <div style={{
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      height: '1px',
-      background: 'linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.3), rgba(6, 182, 212, 0.3), transparent)',
-    }} />
-    {children}
-  </div>
-);
+const Card = ({ children, style, glow }) => <div style={{ background: 'linear-gradient(135deg,rgba(15,10,25,0.9),rgba(10,15,25,0.95))', backdropFilter: 'blur(20px)', borderRadius: '24px', border: '1px solid rgba(139,92,246,0.15)', padding: '32px', position: 'relative', boxShadow: glow ? `0 0 60px ${glow}30` : '0 20px 60px rgba(0,0,0,0.3)', ...style }}><div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '1px', background: 'linear-gradient(90deg,transparent,rgba(139,92,246,0.4),rgba(6,182,212,0.4),transparent)' }} />{children}</div>;
 
-const Input = ({ label, type = 'text', value, onChange, placeholder, textarea, disabled, style }) => {
-  const [isFocused, setIsFocused] = useState(false);
-  
-  return (
-    <div style={{ marginBottom: '24px', ...style }}>
-      {label && (
-        <label style={{
-          display: 'block',
-          fontSize: '11px',
-          color: 'rgba(167, 139, 250, 0.8)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.15em',
-          marginBottom: '10px',
-          fontWeight: 600,
-        }}>
-          {label}
-        </label>
-      )}
-      <div style={{
-        position: 'relative',
-        borderRadius: '14px',
-        padding: '2px',
-        background: isFocused 
-          ? 'linear-gradient(90deg, #8b5cf6, #06b6d4, #f472b6, #fbbf24, #8b5cf6)' 
-          : 'transparent',
-        backgroundSize: '200% 100%',
-        animation: isFocused ? 'gradientFlow 2s linear infinite' : 'none',
-      }}>
-        <style>
-          {`
-            @keyframes gradientFlow {
-              0% { background-position: 0% 50%; }
-              100% { background-position: 200% 50%; }
-            }
-          `}
-        </style>
-        {textarea ? (
-          <textarea
-            value={value}
-            onChange={onChange}
-            placeholder={placeholder}
-            disabled={disabled}
-            rows={4}
-            onFocus={() => setIsFocused(true)}
-            onBlur={() => setIsFocused(false)}
-            style={{
-              width: '100%',
-              padding: '16px 20px',
-              background: '#0a0a0f',
-              border: 'none',
-              borderRadius: '12px',
-              color: '#fff',
-              fontSize: '14px',
-              fontFamily: "'Inter', -apple-system, sans-serif",
-              outline: 'none',
-              resize: 'vertical',
-              boxSizing: 'border-box',
-              transition: 'all 0.2s ease',
-            }}
-          />
-        ) : (
-          <input
-            type={type}
-            value={value}
-            onChange={onChange}
-            placeholder={placeholder}
-            disabled={disabled}
-            onFocus={() => setIsFocused(true)}
-            onBlur={() => setIsFocused(false)}
-            style={{
-              width: '100%',
-              padding: '16px 20px',
-              background: '#0a0a0f',
-              border: 'none',
-              borderRadius: '12px',
-              color: '#fff',
-              fontSize: '14px',
-              fontFamily: "'Inter', -apple-system, sans-serif",
-              outline: 'none',
-              boxSizing: 'border-box',
-              transition: 'all 0.2s ease',
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
+const Input = ({ label, type = 'text', value, onChange, placeholder, textarea, error, style }) => {
+  const [f, setF] = useState(false);
+  const st = { width: '100%', padding: '16px 20px', background: '#0a0a0f', border: `2px solid ${error ? '#ef4444' : f ? '#8b5cf6' : 'rgba(255,255,255,0.1)'}`, borderRadius: '12px', color: '#fff', fontSize: '14px', fontFamily: 'Inter,sans-serif', outline: 'none', boxSizing: 'border-box', transition: 'border 0.3s' };
+  return <div style={{ marginBottom: '20px', ...style }}>{label && <label style={{ display: 'block', fontSize: '11px', color: error ? '#ef4444' : 'rgba(167,139,250,0.8)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: '8px', fontWeight: 600 }}>{label}</label>}{textarea ? <textarea value={value} onChange={onChange} placeholder={placeholder} rows={4} onFocus={() => setF(true)} onBlur={() => setF(false)} style={{ ...st, resize: 'vertical' }} /> : <input type={type} value={value} onChange={onChange} placeholder={placeholder} onFocus={() => setF(true)} onBlur={() => setF(false)} style={st} />}{error && <p style={{ fontSize: '12px', color: '#ef4444', marginTop: '6px' }}>{error}</p>}</div>;
 };
 
-const Select = ({ label, value, onChange, options, style }) => {
-  const [isFocused, setIsFocused] = useState(false);
-  
-  return (
-    <div style={{ marginBottom: '24px', ...style }}>
-      {label && (
-        <label style={{
-          display: 'block',
-          fontSize: '11px',
-          color: 'rgba(167, 139, 250, 0.8)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.15em',
-          marginBottom: '10px',
-          fontWeight: 600,
-        }}>
-          {label}
-        </label>
-      )}
-      <div style={{
-        position: 'relative',
-        borderRadius: '14px',
-        padding: '2px',
-        background: isFocused 
-          ? 'linear-gradient(90deg, #8b5cf6, #06b6d4, #f472b6, #fbbf24, #8b5cf6)' 
-          : 'transparent',
-        backgroundSize: '200% 100%',
-        animation: isFocused ? 'gradientFlow 2s linear infinite' : 'none',
-      }}>
-        <select
-          value={value}
-          onChange={onChange}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
-          style={{
-            width: '100%',
-            padding: '16px 20px',
-            background: '#0a0a0f',
-            border: 'none',
-            borderRadius: '12px',
-            color: '#fff',
-            fontSize: '14px',
-            fontFamily: "'Inter', -apple-system, sans-serif",
-            outline: 'none',
-            boxSizing: 'border-box',
-            cursor: 'pointer',
-          }}
-        >
-          {options.map(opt => (
-            <option key={opt.value} value={opt.value} style={{ background: '#0f0a1a' }}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
-  );
-};
+const Select = ({ label, value, onChange, options, style }) => <div style={{ marginBottom: '20px', ...style }}>{label && <label style={{ display: 'block', fontSize: '11px', color: 'rgba(167,139,250,0.8)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: '8px', fontWeight: 600 }}>{label}</label>}<select value={value} onChange={onChange} style={{ width: '100%', padding: '16px 20px', background: '#0a0a0f', border: '2px solid rgba(255,255,255,0.1)', borderRadius: '12px', color: '#fff', fontSize: '14px', fontFamily: 'Inter,sans-serif', outline: 'none', boxSizing: 'border-box', cursor: 'pointer' }}>{options.map(o => <option key={o.value} value={o.value} style={{ background: '#0f0a1a' }}>{o.label}</option>)}</select></div>;
 
-const StatusBadge = ({ status }) => {
-  const configs = {
-    healthy: { label: 'Protected', color: '#10b981', icon: '🛡️' },
-    warning: { label: 'Check-in Soon', color: '#fbbf24', icon: '⚡' },
-    danger: { label: 'Grace Period', color: '#ef4444', icon: '⏰' },
-    claimable: { label: 'Claimable', color: '#8b5cf6', icon: '🔓' },
-  };
-  const config = configs[status] || configs.healthy;
-  
-  return (
-    <div style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: '8px',
-      padding: '10px 20px',
-      borderRadius: '100px',
-      background: `${config.color}15`,
-      border: `1px solid ${config.color}40`,
-    }}>
-      <span style={{ fontSize: '14px' }}>{config.icon}</span>
-      <span style={{
-        fontSize: '11px',
-        fontWeight: 700,
-        color: config.color,
-        textTransform: 'uppercase',
-        letterSpacing: '0.1em',
-      }}>
-        {config.label}
-      </span>
-    </div>
-  );
-};
+const Logo = ({ size = 'md' }) => { const s = { sm: 24, md: 36, lg: 48 }[size]; return <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}><div style={{ width: s, height: s, borderRadius: '12px', background: 'linear-gradient(135deg,#8b5cf6,#06b6d4)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 20px rgba(139,92,246,0.4)' }}><span style={{ fontSize: s * 0.5 }}>⛓</span></div><span style={{ fontSize: s * 0.55, fontWeight: 700, background: 'linear-gradient(135deg,#fff,#a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Inherichain</span></div>; };
 
-const Logo = ({ size = 'md' }) => {
-  const sizes = { sm: 24, md: 36, lg: 48 };
-  const s = sizes[size];
-  
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-      <div style={{
-        width: s,
-        height: s,
-        borderRadius: '12px',
-        background: 'linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        boxShadow: '0 4px 20px rgba(139, 92, 246, 0.4)',
-      }}>
-        <span style={{ fontSize: s * 0.5, filter: 'brightness(2)' }}>⛓</span>
-      </div>
-      <span style={{
-        fontFamily: "'Inter', -apple-system, sans-serif",
-        fontSize: s * 0.6,
-        fontWeight: 700,
-        background: 'linear-gradient(135deg, #fff 0%, #a78bfa 100%)',
-        WebkitBackgroundClip: 'text',
-        WebkitTextFillColor: 'transparent',
-        letterSpacing: '-0.02em',
-      }}>
-        Inherichain
-      </span>
-    </div>
-  );
-};
+const Modal = ({ isOpen, onClose, title, children }) => isOpen ? <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}><div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)' }} onClick={onClose} /><Card style={{ position: 'relative', maxWidth: '500px', width: '100%', maxHeight: '90vh', overflow: 'auto' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}><h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff' }}>{title}</h2><button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: '24px', cursor: 'pointer' }}>×</button></div>{children}</Card></div> : null;
 
 // ============================================
-// LEGAL DISCLAIMER MODAL
+// LOGIN PAGE
 // ============================================
-const DisclaimerModal = ({ isOpen, onAccept }) => {
-  const [scrolled, setScrolled] = useState(false);
-  
-  if (!isOpen) return null;
-  
-  return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      background: 'rgba(0,0,0,0.9)',
-      backdropFilter: 'blur(10px)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1000,
-      padding: '20px',
-    }}>
-      <Card style={{ maxWidth: '600px', maxHeight: '80vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        <h2 style={{
-          fontSize: '24px',
-          fontWeight: 700,
-          color: '#fff',
-          marginBottom: '20px',
-          textAlign: 'center',
-        }}>
-          ⚠️ Important Disclaimer
-        </h2>
-        
-        <div 
-          onScroll={(e) => {
-            const { scrollTop, scrollHeight, clientHeight } = e.target;
-            if (scrollTop + clientHeight >= scrollHeight - 10) setScrolled(true);
-          }}
-          style={{
-            flex: 1,
-            overflow: 'auto',
-            marginBottom: '24px',
-            padding: '20px',
-            background: 'rgba(0,0,0,0.3)',
-            borderRadius: '12px',
-            fontSize: '13px',
-            lineHeight: '1.7',
-            color: 'rgba(255,255,255,0.7)',
-          }}
-        >
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#fff' }}>Please read carefully before using Inherichain:</strong>
-          </p>
-          
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#a78bfa' }}>1. No Custody of Funds:</strong> Inherichain does not custody, control, or have access to your cryptocurrency, private keys, seed phrases, or any digital assets. All encryption occurs client-side in your browser.
-          </p>
-          
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#a78bfa' }}>2. Your Responsibility:</strong> You are solely responsible for:
-          </p>
-          <ul style={{ marginBottom: '16px', marginLeft: '20px' }}>
-            <li>Securely storing and sharing your vault password with beneficiaries</li>
-            <li>Ensuring beneficiary information is accurate and up-to-date</li>
-            <li>Performing regular check-ins to maintain vault protection</li>
-            <li>Verifying all wallet addresses and recovery information</li>
-          </ul>
-          
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#a78bfa' }}>3. No Guarantees:</strong> This service is provided "as-is" without warranties of any kind. We do not guarantee successful inheritance transfers, data recovery, or protection against all security threats.
-          </p>
-          
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#a78bfa' }}>4. Not Legal or Financial Advice:</strong> Inherichain is a software tool only. It does not constitute legal, financial, tax, or estate planning advice. Consult qualified professionals for your specific situation.
-          </p>
-          
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#a78bfa' }}>5. Risk of Loss:</strong> Cryptocurrency and digital assets carry inherent risks including but not limited to: loss of access, market volatility, regulatory changes, and technical failures. Use at your own risk.
-          </p>
-          
-          <p style={{ marginBottom: '16px' }}>
-            <strong style={{ color: '#a78bfa' }}>6. Limitation of Liability:</strong> To the maximum extent permitted by law, Inherichain and its creators shall not be liable for any direct, indirect, incidental, or consequential damages arising from your use of this service.
-          </p>
-          
-          <p style={{ marginBottom: '16px', paddingTop: '16px', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
-            By clicking "I Understand & Accept", you acknowledge that you have read, understood, and agree to these terms.
-          </p>
-        </div>
-        
-        <Button
-          onClick={onAccept}
-          variant="primary"
-          size="lg"
-          fullWidth
-          disabled={!scrolled}
-          style={{ opacity: scrolled ? 1 : 0.5 }}
-        >
-          {scrolled ? 'I Understand & Accept' : 'Scroll to Read All Terms'}
-        </Button>
+const LoginPage = ({ onLogin, onSignup, onBeneficiary }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [needs2FA, setNeeds2FA] = useState(false);
+  const [acc, setAcc] = useState(null);
+
+  const handleLogin = async () => {
+    setError('');
+    if (!email || !password) { setError('Enter email and password'); return; }
+    setLoading(true);
+    try {
+      const account = Storage.getAccount(email);
+      if (!account) { setError('Account not found'); setLoading(false); return; }
+      try { await CryptoUtils.decrypt(account.encryptedVault, password); } catch { setError('Wrong password'); setLoading(false); return; }
+      if (account.security?.totpEnabled) { setAcc(account); setNeeds2FA(true); setLoading(false); return; }
+      completeLogin(account, password);
+    } catch (e) { setError(e.message); setLoading(false); }
+  };
+
+  const verify2FA = async () => {
+    if (CryptoUtils.verifyTOTP(acc.security.totpSecret, code) || acc.security.backupCodes?.includes(code.toUpperCase())) {
+      if (acc.security.backupCodes?.includes(code.toUpperCase())) {
+        acc.security.backupCodes = acc.security.backupCodes.filter(c => c !== code.toUpperCase());
+        Storage.saveAccount(email, acc);
+      }
+      completeLogin(acc, password);
+    } else { setError('Invalid code'); }
+  };
+
+  const completeLogin = async (account, pwd) => {
+    const vaultData = await CryptoUtils.decrypt(account.encryptedVault, pwd);
+    Storage.saveSession({ email: account.email, loggedInAt: Date.now() });
+    onLogin({ account, vaultData, password: pwd });
+  };
+
+  if (needs2FA) return (
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
+      <Card style={{ maxWidth: '420px', width: '100%' }}>
+        <div style={{ textAlign: 'center', marginBottom: '32px' }}><div style={{ fontSize: '48px', marginBottom: '16px' }}>🔐</div><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff' }}>Two-Factor Auth</h2></div>
+        <Input label="6-Digit Code" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="000000" error={error} />
+        <Button fullWidth onClick={verify2FA} disabled={code.length !== 6}>Verify</Button>
+        <Button variant="ghost" fullWidth onClick={() => { setNeeds2FA(false); setCode(''); }} style={{ marginTop: '16px' }}>← Back</Button>
       </Card>
     </div>
   );
+
+  return (
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <header style={{ padding: '24px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Logo />
+        <div style={{ display: 'flex', gap: '12px' }}><Button variant="ghost" onClick={onBeneficiary}>I'm a Beneficiary</Button><Button variant="secondary" onClick={onSignup}>Sign Up</Button></div>
+      </header>
+      <main style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
+        <Card style={{ maxWidth: '420px', width: '100%' }}>
+          <div style={{ textAlign: 'center', marginBottom: '32px' }}><Logo size="lg" /><h1 style={{ fontSize: '28px', fontWeight: 700, color: '#fff', marginTop: '24px' }}>Welcome Back</h1><p style={{ color: 'rgba(255,255,255,0.5)' }}>Access your digital legacy vault</p></div>
+          <Input label="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" />
+          <Input label="Password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" error={error} />
+          <Button fullWidth onClick={handleLogin} disabled={loading}>{loading ? 'Logging in...' : 'Login'}</Button>
+          <div style={{ textAlign: 'center', marginTop: '24px' }}><span style={{ color: 'rgba(255,255,255,0.4)' }}>New here? </span><button onClick={onSignup} style={{ background: 'none', border: 'none', color: '#a78bfa', cursor: 'pointer', fontWeight: 600 }}>Create Account</button></div>
+        </Card>
+      </main>
+    </div>
+  );
 };
 
 // ============================================
-// LANDING PAGE
+// SIGNUP PAGE
 // ============================================
-const LandingPage = ({ onGetStarted, onBeneficiary }) => (
-  <div style={{
-    position: 'relative',
-    zIndex: 1,
-    minHeight: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-  }}>
-    {/* Header */}
-    <header style={{
-      padding: '24px 40px',
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-    }}>
-      <Logo size="md" />
-      <div style={{ display: 'flex', gap: '16px' }}>
-        <Button variant="ghost" onClick={onBeneficiary}>I'm a Beneficiary</Button>
-        <Button variant="secondary" onClick={onGetStarted}>Launch App</Button>
-      </div>
-    </header>
-    
-    {/* Hero */}
-    <main style={{
-      flex: 1,
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '40px',
-      textAlign: 'center',
-    }}>
-      <div style={{
-        display: 'inline-block',
-        padding: '8px 20px',
-        borderRadius: '100px',
-        background: 'rgba(139, 92, 246, 0.1)',
-        border: '1px solid rgba(139, 92, 246, 0.2)',
-        marginBottom: '32px',
-      }}>
-        <span style={{
-          fontSize: '12px',
-          fontWeight: 600,
-          color: '#a78bfa',
-          textTransform: 'uppercase',
-          letterSpacing: '0.1em',
-        }}>
-          🔐 Private & Trustless
-        </span>
-      </div>
-      
-      <h1 style={{
-        fontSize: 'clamp(40px, 8vw, 72px)',
-        fontWeight: 800,
-        lineHeight: 1.1,
-        marginBottom: '24px',
-        background: 'linear-gradient(135deg, #fff 0%, #a78bfa 50%, #06b6d4 100%)',
-        WebkitBackgroundClip: 'text',
-        WebkitTextFillColor: 'transparent',
-        maxWidth: '900px',
-      }}>
-        Your Crypto Legacy,
-        <br />Protected Forever
-      </h1>
-      
-      <p style={{
-        fontSize: '18px',
-        lineHeight: 1.7,
-        color: 'rgba(255,255,255,0.6)',
-        maxWidth: '600px',
-        marginBottom: '48px',
-      }}>
-        Ensure your cryptocurrency reaches your loved ones. Client-side encryption, 
-        no custody, no KYC. Your keys, your rules, your legacy.
-      </p>
-      
-      <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', justifyContent: 'center' }}>
-        <Button onClick={onGetStarted} size="lg">
-          Create Your Vault →
-        </Button>
-        <Button variant="secondary" size="lg" onClick={onBeneficiary}>
-          Claim Inheritance
-        </Button>
-      </div>
-      
-      {/* Features */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-        gap: '24px',
-        marginTop: '80px',
-        width: '100%',
-        maxWidth: '1000px',
-      }}>
-        {[
-          { icon: '🔒', title: 'Client-Side Encryption', desc: 'Your data is encrypted in your browser. We never see your secrets.' },
-          { icon: '⛓️', title: 'Multi-Chain Support', desc: 'Protect Bitcoin, Ethereum, Solana, and all your crypto holdings.' },
-          { icon: '⏰', title: 'Dead Man\'s Switch', desc: 'Automatic release to beneficiaries after inactivity period.' },
-          { icon: '👁️', title: 'Zero Knowledge', desc: 'No KYC, no accounts, no tracking. Complete privacy.' },
-        ].map((f, i) => (
-          <Card key={i} style={{ padding: '28px', textAlign: 'left' }}>
-            <div style={{ fontSize: '32px', marginBottom: '16px' }}>{f.icon}</div>
-            <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>{f.title}</h3>
-            <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)', lineHeight: 1.6 }}>{f.desc}</p>
-          </Card>
-        ))}
-      </div>
-    </main>
-    
-    {/* Footer */}
-    <footer style={{
-      padding: '24px 40px',
-      textAlign: 'center',
-      color: 'rgba(255,255,255,0.3)',
-      fontSize: '12px',
-    }}>
-      © 2025 Inherichain. Not financial or legal advice. Use at your own risk.
-    </footer>
-  </div>
-);
-
-// ============================================
-// SETUP WIZARD
-// ============================================
-const SetupWizard = ({ onComplete, onBack }) => {
+const SignupPage = ({ onSignup, onLogin, onBeneficiary }) => {
   const [step, setStep] = useState(1);
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [beneficiaries, setBeneficiaries] = useState([{ name: '', address: '', email: '' }]);
-  const [wallets, setWallets] = useState([{ name: '', address: '', chain: 'ETH', balance: '' }]);
-  const [secrets, setSecrets] = useState([{ label: '', value: '' }]);
-  const [instructions, setInstructions] = useState('');
-  const [checkInDays, setCheckInDays] = useState('30');
-  const [graceDays, setGraceDays] = useState('7');
-  const [isEncrypting, setIsEncrypting] = useState(false);
-  
-  const addBeneficiary = () => setBeneficiaries([...beneficiaries, { name: '', address: '', email: '' }]);
-  const addWallet = () => setWallets([...wallets, { name: '', address: '', chain: 'ETH', balance: '' }]);
-  const addSecret = () => setSecrets([...secrets, { label: '', value: '' }]);
-  
-  const updateBeneficiary = (i, field, val) => {
-    const updated = [...beneficiaries];
-    updated[i][field] = val;
-    setBeneficiaries(updated);
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const next = () => {
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Enter valid email'); return; }
+    if (Storage.getAccount(email)) { setError('Account exists'); return; }
+    setError(''); setStep(2);
   };
-  
-  const updateWallet = (i, field, val) => {
-    const updated = [...wallets];
-    updated[i][field] = val;
-    setWallets(updated);
-  };
-  
-  const updateSecret = (i, field, val) => {
-    const updated = [...secrets];
-    updated[i][field] = val;
-    setSecrets(updated);
-  };
-  
-  const handleCreate = async () => {
-    if (password !== confirmPassword) {
-      alert('Passwords do not match!');
-      return;
-    }
-    if (password.length < 8) {
-      alert('Password must be at least 8 characters');
-      return;
-    }
-    
-    setIsEncrypting(true);
-    
+
+  const create = async () => {
+    if (password.length < 8) { setError('Min 8 characters'); return; }
+    if (password !== confirm) { setError('Passwords don\'t match'); return; }
+    setLoading(true);
     try {
-      const vaultData = {
-        beneficiaries: beneficiaries.filter(b => b.name || b.address),
-        wallets: wallets.filter(w => w.address),
-        secrets: secrets.filter(s => s.value),
-        instructions,
-        checkInDays: parseInt(checkInDays),
-        graceDays: parseInt(graceDays),
-        createdAt: Date.now(),
-      };
-      
-      const encrypted = await CryptoUtils.encrypt(vaultData, password);
-      
-      // Simulate delay for effect
-      await new Promise(r => setTimeout(r, 1500));
-      
-      onComplete({
-        encrypted,
-        vaultData,
-        settings: { checkInDays: parseInt(checkInDays), graceDays: parseInt(graceDays) },
-      });
-    } catch (e) {
-      alert('Encryption failed: ' + e.message);
-    } finally {
-      setIsEncrypting(false);
-    }
+      const vault = { beneficiaries: [], crypto: { wallets: [], secrets: [], exchanges: [] }, passwords: [], documents: [], finance: { bankAccounts: [], investments: [], debts: [] }, messages: [], contacts: [], finalWishes: {}, settings: { checkInDays: 30, graceDays: 7, platformFee: PLATFORM_FEE_PERCENT }, createdAt: Date.now() };
+      const encrypted = await CryptoUtils.encrypt(vault, password);
+      const account = { id: CryptoUtils.genId(), email: email.toLowerCase(), encryptedVault: encrypted, security: { totpEnabled: false, totpSecret: null, backupCodes: [] }, lastCheckIn: Date.now(), createdAt: Date.now() };
+      Storage.saveAccount(email, account);
+      Storage.saveSession({ email: account.email, loggedInAt: Date.now() });
+      onSignup({ account, vaultData: vault, password });
+    } catch (e) { setError(e.message); } finally { setLoading(false); }
   };
-  
-  const steps = [
-    { num: 1, label: 'Password' },
-    { num: 2, label: 'Beneficiaries' },
-    { num: 3, label: 'Wallets' },
-    { num: 4, label: 'Secrets' },
-    { num: 5, label: 'Settings' },
+
+  return (
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <header style={{ padding: '24px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Logo />
+        <div style={{ display: 'flex', gap: '12px' }}><Button variant="ghost" onClick={onBeneficiary}>I'm a Beneficiary</Button><Button variant="secondary" onClick={onLogin}>Login</Button></div>
+      </header>
+      <main style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
+        <Card style={{ maxWidth: '420px', width: '100%' }}>
+          <div style={{ textAlign: 'center', marginBottom: '32px' }}><Logo size="lg" /><h1 style={{ fontSize: '28px', fontWeight: 700, color: '#fff', marginTop: '24px' }}>Create Account</h1></div>
+          {step === 1 ? (<><Input label="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" error={error} /><Button fullWidth onClick={next}>Continue →</Button></>) : (<><div style={{ padding: '12px 16px', background: 'rgba(139,92,246,0.1)', borderRadius: '8px', marginBottom: '24px' }}><p style={{ fontSize: '13px', color: '#a78bfa', margin: 0 }}>{email}</p></div><Input label="Master Password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Min 8 characters" /><Input label="Confirm" type="password" value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="Repeat password" error={error} /><div style={{ padding: '16px', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: '12px', marginBottom: '24px' }}><p style={{ fontSize: '12px', color: '#fbbf24', margin: 0 }}>⚠️ This password encrypts your vault. Share it with beneficiaries securely. We cannot recover it.</p></div><Button fullWidth onClick={create} disabled={loading}>{loading ? 'Creating...' : 'Create Account'}</Button><Button variant="ghost" fullWidth onClick={() => setStep(1)} style={{ marginTop: '12px' }}>← Back</Button></>)}
+          <div style={{ textAlign: 'center', marginTop: '24px' }}><span style={{ color: 'rgba(255,255,255,0.4)' }}>Have an account? </span><button onClick={onLogin} style={{ background: 'none', border: 'none', color: '#a78bfa', cursor: 'pointer', fontWeight: 600 }}>Login</button></div>
+        </Card>
+      </main>
+    </div>
+  );
+};
+
+// ============================================
+// DASHBOARD - Main App Interface
+// ============================================
+const Dashboard = ({ account, vaultData, password, onLogout, onUpdate }) => {
+  const [tab, setTab] = useState('overview');
+  const [showSecurity, setShowSecurity] = useState(false);
+  const [showExport, setShowExport] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [vault, setVault] = useState(vaultData);
+  const [lastCheckIn, setLastCheckIn] = useState(account.lastCheckIn || Date.now());
+
+  const save = useCallback(async (newVault) => {
+    setSaving(true);
+    try {
+      const encrypted = await CryptoUtils.encrypt(newVault, password);
+      const updated = { ...account, encryptedVault: encrypted, lastModified: Date.now() };
+      Storage.saveAccount(account.email, updated);
+      setVault(newVault);
+      onUpdate({ account: updated, vaultData: newVault });
+    } finally { setSaving(false); }
+  }, [account, password, onUpdate]);
+
+  const checkIn = () => {
+    const now = Date.now();
+    setLastCheckIn(now);
+    Storage.saveAccount(account.email, { ...account, lastCheckIn: now });
+  };
+
+  const timeLeft = () => {
+    const days = vault.settings?.checkInDays || 30;
+    const rem = (lastCheckIn + days * 86400000) - Date.now();
+    if (rem <= 0) return { text: 'OVERDUE!', urgent: true };
+    return { text: `${Math.floor(rem / 86400000)}d ${Math.floor((rem % 86400000) / 3600000)}h`, urgent: rem < 3 * 86400000 };
+  };
+  const time = timeLeft();
+
+  const tabs = [
+    { id: 'overview', icon: '📊', label: 'Overview' },
+    { id: 'beneficiaries', icon: '👥', label: 'Beneficiaries' },
+    { id: 'crypto', icon: '₿', label: 'Crypto' },
+    { id: 'passwords', icon: '🔑', label: 'Passwords' },
+    { id: 'documents', icon: '📄', label: 'Documents' },
+    { id: 'finance', icon: '🏦', label: 'Finance' },
+    { id: 'messages', icon: '💌', label: 'Messages' },
+    { id: 'contacts', icon: '📞', label: 'Contacts' },
+    { id: 'wishes', icon: '📝', label: 'Final Wishes' },
+    { id: 'settings', icon: '⚙️', label: 'Settings' },
   ];
-  
+
   return (
-    <div style={{
-      position: 'relative',
-      zIndex: 1,
-      minHeight: '100vh',
-      padding: '40px',
-    }}>
-      <div style={{ maxWidth: '600px', margin: '0 auto' }}>
-        {/* Header */}
-        <div style={{ marginBottom: '40px' }}>
-          <Button variant="ghost" onClick={onBack} style={{ marginBottom: '24px' }}>
-            ← Back
-          </Button>
-          <Logo size="sm" />
-          <h1 style={{
-            fontSize: '32px',
-            fontWeight: 700,
-            color: '#fff',
-            marginTop: '24px',
-            marginBottom: '8px',
-          }}>
-            Create Your Vault
-          </h1>
-          <p style={{ color: 'rgba(255,255,255,0.5)' }}>
-            Step {step} of 5: {steps[step - 1].label}
-          </p>
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh' }}>
+      <header style={{ padding: '20px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+        <Logo size="sm" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          {saving && <span style={{ fontSize: '12px', color: '#a78bfa' }}>Saving...</span>}
+          <span style={{ fontSize: '13px', color: 'rgba(255,255,255,0.5)' }}>{account.email}</span>
+          <Button variant="secondary" size="sm" onClick={() => setShowSecurity(true)}>🔐 Security</Button>
+          <Button variant="ghost" size="sm" onClick={onLogout}>Logout</Button>
         </div>
-        
-        {/* Progress */}
-        <div style={{
-          display: 'flex',
-          gap: '8px',
-          marginBottom: '40px',
-        }}>
-          {steps.map((s) => (
-            <div
-              key={s.num}
-              style={{
-                flex: 1,
-                height: '4px',
-                borderRadius: '2px',
-                background: s.num <= step 
-                  ? 'linear-gradient(90deg, #8b5cf6, #06b6d4)' 
-                  : 'rgba(255,255,255,0.1)',
-                transition: 'all 0.3s ease',
-              }}
-            />
-          ))}
-        </div>
-        
-        <Card>
-          {/* Step 1: Password */}
-          {step === 1 && (
-            <>
-              <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔐</div>
-                <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
-                  Create Master Password
-                </h2>
-                <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)' }}>
-                  This password encrypts your vault. Share it securely with your beneficiaries offline.
-                </p>
-              </div>
-              
-              <Input
-                label="Master Password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Minimum 8 characters"
-              />
-              
-              <Input
-                label="Confirm Password"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Repeat your password"
-              />
-              
-              <div style={{
-                padding: '16px',
-                background: 'rgba(251, 191, 36, 0.1)',
-                border: '1px solid rgba(251, 191, 36, 0.2)',
-                borderRadius: '12px',
-                marginBottom: '24px',
-              }}>
-                <p style={{ fontSize: '13px', color: '#fbbf24', margin: 0 }}>
-                  ⚠️ <strong>Critical:</strong> This password must be shared with your beneficiaries through a secure offline method. We cannot recover it.
-                </p>
-              </div>
-              
-              <Button
-                fullWidth
-                onClick={() => setStep(2)}
-                disabled={!password || password !== confirmPassword || password.length < 8}
-              >
-                Continue →
-              </Button>
-            </>
-          )}
-          
-          {/* Step 2: Beneficiaries */}
-          {step === 2 && (
-            <>
-              <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>👨‍👩‍👧‍👦</div>
-                <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
-                  Add Beneficiaries
-                </h2>
-                <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)' }}>
-                  Who should receive access to your crypto?
-                </p>
-              </div>
-              
-              {beneficiaries.map((b, i) => (
-                <div key={i} style={{
-                  padding: '20px',
-                  background: 'rgba(255,255,255,0.02)',
-                  borderRadius: '12px',
-                  marginBottom: '16px',
-                }}>
-                  <div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '16px', fontWeight: 600 }}>
-                    Beneficiary {i + 1}
-                  </div>
-                  <Input
-                    label="Name"
-                    value={b.name}
-                    onChange={(e) => updateBeneficiary(i, 'name', e.target.value)}
-                    placeholder="e.g., John Doe"
-                    style={{ marginBottom: '16px' }}
-                  />
-                  <Input
-                    label="Wallet Address (Optional)"
-                    value={b.address}
-                    onChange={(e) => updateBeneficiary(i, 'address', e.target.value)}
-                    placeholder="0x..."
-                    style={{ marginBottom: '16px' }}
-                  />
-                  <Input
-                    label="Email (Optional - for notifications)"
-                    type="email"
-                    value={b.email}
-                    onChange={(e) => updateBeneficiary(i, 'email', e.target.value)}
-                    placeholder="john@example.com"
-                    style={{ marginBottom: '0' }}
-                  />
-                </div>
-              ))}
-              
-              <Button variant="secondary" fullWidth onClick={addBeneficiary} style={{ marginBottom: '24px' }}>
-                + Add Another Beneficiary
-              </Button>
-              
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <Button variant="ghost" onClick={() => setStep(1)} style={{ flex: 1 }}>
-                  ← Back
-                </Button>
-                <Button onClick={() => setStep(3)} style={{ flex: 2 }}>
-                  Continue →
-                </Button>
-              </div>
-            </>
-          )}
-          
-          {/* Step 3: Wallets */}
-          {step === 3 && (
-            <>
-              <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>💰</div>
-                <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
-                  Track Your Wallets
-                </h2>
-                <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)' }}>
-                  Add wallet addresses for your beneficiaries to know what exists (view-only).
-                </p>
-              </div>
-              
-              {wallets.map((w, i) => (
-                <div key={i} style={{
-                  padding: '20px',
-                  background: 'rgba(255,255,255,0.02)',
-                  borderRadius: '12px',
-                  marginBottom: '16px',
-                }}>
-                  <Input
-                    label="Wallet Name"
-                    value={w.name}
-                    onChange={(e) => updateWallet(i, 'name', e.target.value)}
-                    placeholder="e.g., Main Ledger, Coinbase"
-                    style={{ marginBottom: '16px' }}
-                  />
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                    <Select
-                      label="Chain"
-                      value={w.chain}
-                      onChange={(e) => updateWallet(i, 'chain', e.target.value)}
-                      options={CHAINS.map(c => ({ value: c.value, label: `${c.icon} ${c.label}` }))}
-                    />
-                    <Input
-                      label="Approx. Balance"
-                      value={w.balance}
-                      onChange={(e) => updateWallet(i, 'balance', e.target.value)}
-                      placeholder="e.g., 2.5"
-                      style={{ marginBottom: '0' }}
-                    />
-                  </div>
-                  <Input
-                    label="Wallet Address"
-                    value={w.address}
-                    onChange={(e) => updateWallet(i, 'address', e.target.value)}
-                    placeholder="0x... or bc1..."
-                    style={{ marginBottom: '0', marginTop: '16px' }}
-                  />
-                </div>
-              ))}
-              
-              <Button variant="secondary" fullWidth onClick={addWallet} style={{ marginBottom: '24px' }}>
-                + Add Another Wallet
-              </Button>
-              
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <Button variant="ghost" onClick={() => setStep(2)} style={{ flex: 1 }}>
-                  ← Back
-                </Button>
-                <Button onClick={() => setStep(4)} style={{ flex: 2 }}>
-                  Continue →
-                </Button>
-              </div>
-            </>
-          )}
-          
-          {/* Step 4: Secrets */}
-          {step === 4 && (
-            <>
-              <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🗝️</div>
-                <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
-                  Store Recovery Secrets
-                </h2>
-                <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)' }}>
-                  Seed phrases, passwords, PINs — encrypted client-side with AES-256.
-                </p>
-              </div>
-              
-              <div style={{
-                padding: '16px',
-                background: 'rgba(16, 185, 129, 0.1)',
-                border: '1px solid rgba(16, 185, 129, 0.2)',
-                borderRadius: '12px',
-                marginBottom: '24px',
-              }}>
-                <p style={{ fontSize: '13px', color: '#10b981', margin: 0 }}>
-                  🔒 <strong>Encrypted locally:</strong> Your secrets never leave your browser unencrypted.
-                </p>
-              </div>
-              
-              {secrets.map((s, i) => (
-                <div key={i} style={{
-                  padding: '20px',
-                  background: 'rgba(255,255,255,0.02)',
-                  borderRadius: '12px',
-                  marginBottom: '16px',
-                }}>
-                  <Input
-                    label="Label"
-                    value={s.label}
-                    onChange={(e) => updateSecret(i, 'label', e.target.value)}
-                    placeholder="e.g., Ledger Seed Phrase, Coinbase Password"
-                    style={{ marginBottom: '16px' }}
-                  />
-                  <Input
-                    label="Secret Value"
-                    value={s.value}
-                    onChange={(e) => updateSecret(i, 'value', e.target.value)}
-                    placeholder="Enter your seed phrase, password, or PIN..."
-                    textarea
-                    style={{ marginBottom: '0' }}
-                  />
-                </div>
-              ))}
-              
-              <Button variant="secondary" fullWidth onClick={addSecret} style={{ marginBottom: '16px' }}>
-                + Add Another Secret
-              </Button>
-              
-              <Input
-                label="Instructions for Beneficiaries (Optional)"
-                value={instructions}
-                onChange={(e) => setInstructions(e.target.value)}
-                placeholder="Any additional instructions on how to access your crypto..."
-                textarea
-              />
-              
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <Button variant="ghost" onClick={() => setStep(3)} style={{ flex: 1 }}>
-                  ← Back
-                </Button>
-                <Button onClick={() => setStep(5)} style={{ flex: 2 }}>
-                  Continue →
-                </Button>
-              </div>
-            </>
-          )}
-          
-          {/* Step 5: Settings */}
-          {step === 5 && (
-            <>
-              <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚙️</div>
-                <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
-                  Dead Man's Switch Settings
-                </h2>
-                <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)' }}>
-                  Configure your check-in frequency and grace period.
-                </p>
-              </div>
-              
-              <Select
-                label="Check-in Frequency"
-                value={checkInDays}
-                onChange={(e) => setCheckInDays(e.target.value)}
-                options={[
-                  { value: '7', label: 'Every 7 days' },
-                  { value: '14', label: 'Every 14 days' },
-                  { value: '30', label: 'Every 30 days' },
-                  { value: '60', label: 'Every 60 days' },
-                  { value: '90', label: 'Every 90 days' },
-                  { value: '180', label: 'Every 180 days' },
-                  { value: '365', label: 'Every 365 days' },
-                ]}
-              />
-              
-              <Select
-                label="Grace Period After Missed Check-in"
-                value={graceDays}
-                onChange={(e) => setGraceDays(e.target.value)}
-                options={[
-                  { value: '7', label: '7 days' },
-                  { value: '14', label: '14 days' },
-                  { value: '30', label: '30 days' },
-                  { value: '60', label: '60 days' },
-                  { value: '90', label: '90 days' },
-                ]}
-              />
-              
-              <div style={{
-                padding: '20px',
-                background: 'rgba(139, 92, 246, 0.1)',
-                border: '1px solid rgba(139, 92, 246, 0.2)',
-                borderRadius: '12px',
-                marginBottom: '24px',
-              }}>
-                <p style={{ fontSize: '14px', color: '#a78bfa', margin: 0 }}>
-                  📋 <strong>Summary:</strong> You must check in every <strong>{checkInDays} days</strong>. 
-                  If you miss a check-in, beneficiaries can claim after an additional <strong>{graceDays} day</strong> grace period.
-                </p>
-              </div>
-              
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <Button variant="ghost" onClick={() => setStep(4)} style={{ flex: 1 }}>
-                  ← Back
-                </Button>
-                <Button 
-                  variant="success" 
-                  onClick={handleCreate} 
-                  style={{ flex: 2 }}
-                  disabled={isEncrypting}
-                >
-                  {isEncrypting ? '🔐 Encrypting...' : '✓ Create Vault'}
-                </Button>
-              </div>
-            </>
-          )}
-        </Card>
+      </header>
+      <div style={{ display: 'flex', minHeight: 'calc(100vh - 80px)' }}>
+        <aside style={{ width: '200px', padding: '24px 16px', borderRight: '1px solid rgba(255,255,255,0.05)' }}>
+          {tabs.map(t => <button key={t.id} onClick={() => setTab(t.id)} style={{ width: '100%', padding: '12px 16px', marginBottom: '4px', background: tab === t.id ? 'rgba(139,92,246,0.15)' : 'transparent', border: 'none', borderRadius: '10px', color: tab === t.id ? '#a78bfa' : 'rgba(255,255,255,0.6)', fontSize: '13px', fontWeight: 500, textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '10px' }}><span>{t.icon}</span>{t.label}</button>)}
+        </aside>
+        <main style={{ flex: 1, padding: '32px 40px', overflow: 'auto' }}>
+          {tab === 'overview' && <OverviewTab vault={vault} account={account} time={time} onCheckIn={checkIn} onExport={() => setShowExport(true)} />}
+          {tab === 'beneficiaries' && <ListTab title="Beneficiaries" icon="👥" items={vault.beneficiaries || []} fields={[{ key: 'name', label: 'Name', placeholder: 'John Doe' }, { key: 'email', label: 'Email', placeholder: 'john@email.com' }, { key: 'share', label: 'Share %', placeholder: '100' }]} onSave={items => save({ ...vault, beneficiaries: items })} />}
+          {tab === 'crypto' && <CryptoTab vault={vault} onSave={save} />}
+          {tab === 'passwords' && <ListTab title="Passwords" icon="🔑" items={vault.passwords || []} fields={[{ key: 'site', label: 'Website', placeholder: 'gmail.com' }, { key: 'username', label: 'Username', placeholder: 'user@...' }, { key: 'password', label: 'Password', placeholder: '••••••', secret: true }, { key: 'notes', label: 'Notes (2FA)', placeholder: '2FA info...' }]} onSave={items => save({ ...vault, passwords: items })} />}
+          {tab === 'documents' && <ListTab title="Documents" icon="📄" items={vault.documents || []} fields={[{ key: 'name', label: 'Document', placeholder: 'Last Will' }, { key: 'type', label: 'Type', placeholder: 'Will/Trust/Insurance' }, { key: 'location', label: 'Location', placeholder: 'Safe deposit box...' }, { key: 'details', label: 'Details', placeholder: 'Notes...', textarea: true }]} onSave={items => save({ ...vault, documents: items })} />}
+          {tab === 'finance' && <FinanceTab vault={vault} onSave={save} />}
+          {tab === 'messages' && <ListTab title="Final Messages" icon="💌" items={vault.messages || []} fields={[{ key: 'recipient', label: 'To', placeholder: 'Mom, Sarah...' }, { key: 'message', label: 'Message', placeholder: 'Your message...', textarea: true }]} onSave={items => save({ ...vault, messages: items })} pink />}
+          {tab === 'contacts' && <ListTab title="Key Contacts" icon="📞" items={vault.contacts || []} fields={[{ key: 'name', label: 'Name', placeholder: 'John Smith' }, { key: 'role', label: 'Role', placeholder: 'Attorney' }, { key: 'phone', label: 'Phone', placeholder: '+1...' }, { key: 'email', label: 'Email', placeholder: 'email@...' }]} onSave={items => save({ ...vault, contacts: items })} />}
+          {tab === 'wishes' && <WishesTab vault={vault} onSave={save} />}
+          {tab === 'settings' && <SettingsTab vault={vault} account={account} onSave={save} onShowSecurity={() => setShowSecurity(true)} />}
+        </main>
       </div>
+      <SecurityModal isOpen={showSecurity} onClose={() => setShowSecurity(false)} account={account} onUpdate={updated => { Storage.saveAccount(account.email, updated); onUpdate({ account: updated, vaultData: vault }); }} />
+      <ExportModal isOpen={showExport} onClose={() => setShowExport(false)} account={account} />
     </div>
   );
 };
 
 // ============================================
-// OWNER DASHBOARD
+// TABS
 // ============================================
-const OwnerDashboard = ({ vaultData, settings, onCheckIn, onLogout }) => {
-  const [lastCheckIn, setLastCheckIn] = useState(Date.now());
-  const [showSecret, setShowSecret] = useState({});
-  
-  const getStatus = () => {
-    const now = Date.now();
-    const checkInDeadline = lastCheckIn + (settings.checkInDays * 24 * 60 * 60 * 1000);
-    const claimDeadline = checkInDeadline + (settings.graceDays * 24 * 60 * 60 * 1000);
-    
-    if (now >= claimDeadline) return 'claimable';
-    if (now >= checkInDeadline) return 'danger';
-    if (now >= checkInDeadline - (3 * 24 * 60 * 60 * 1000)) return 'warning';
-    return 'healthy';
-  };
-  
-  const getTimeRemaining = () => {
-    const now = Date.now();
-    const checkInDeadline = lastCheckIn + (settings.checkInDays * 24 * 60 * 60 * 1000);
-    const remaining = checkInDeadline - now;
-    
-    if (remaining <= 0) return 'Check-in overdue!';
-    
-    const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
-    const hours = Math.floor((remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-    
-    return `${days}d ${hours}h remaining`;
-  };
-  
-  const handleCheckIn = () => {
-    setLastCheckIn(Date.now());
-    onCheckIn();
-  };
-  
-  const totalValue = vaultData.wallets.reduce((sum, w) => {
-    const price = PRICES[w.chain] || 0;
-    return sum + (parseFloat(w.balance) || 0) * price;
-  }, 0);
-  
-  return (
-    <div style={{
-      position: 'relative',
-      zIndex: 1,
-      minHeight: '100vh',
-      padding: '40px',
-    }}>
-      <div style={{ maxWidth: '900px', margin: '0 auto' }}>
-        {/* Header */}
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '40px',
-        }}>
-          <Logo size="sm" />
-          <Button variant="ghost" onClick={onLogout}>Logout</Button>
+const OverviewTab = ({ vault, account, time, onCheckIn, onExport }) => {
+  const total = (vault.crypto?.wallets?.length || 0) + (vault.passwords?.length || 0) + (vault.documents?.length || 0) + (vault.messages?.length || 0) + (vault.contacts?.length || 0);
+  return <>
+    <Card glow={time.urgent ? '#ef4444' : '#10b981'} style={{ marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '20px' }}>
+        <div>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 16px', borderRadius: '100px', background: time.urgent ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)', marginBottom: '16px' }}><span>{time.urgent ? '⚠️' : '🛡️'}</span><span style={{ fontSize: '12px', fontWeight: 600, color: time.urgent ? '#ef4444' : '#10b981' }}>{time.urgent ? 'ACTION REQUIRED' : 'PROTECTED'}</span></div>
+          <h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>Your Legacy is {time.urgent ? 'At Risk' : 'Secure'}</h2>
+          <p style={{ color: 'rgba(255,255,255,0.5)' }}>Next check-in: <strong style={{ color: '#fff' }}>{time.text}</strong></p>
         </div>
-        
-        {/* Status Card */}
-        <Card glow={getStatus() === 'healthy' ? '#10b981' : '#ef4444'} style={{ marginBottom: '24px' }}>
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: '20px',
-          }}>
-            <div>
-              <StatusBadge status={getStatus()} />
-              <h2 style={{
-                fontSize: '28px',
-                fontWeight: 700,
-                color: '#fff',
-                marginTop: '16px',
-                marginBottom: '8px',
-              }}>
-                Your Vault is {getStatus() === 'healthy' ? 'Protected' : 'At Risk'}
-              </h2>
-              <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '14px' }}>
-                Next check-in: <strong style={{ color: '#fff' }}>{getTimeRemaining()}</strong>
-              </p>
-            </div>
-            <Button
-              variant={getStatus() === 'healthy' ? 'primary' : 'danger'}
-              size="lg"
-              onClick={handleCheckIn}
-            >
-              ✓ Check In Now
-            </Button>
-          </div>
-        </Card>
-        
-        {/* Stats */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-          gap: '16px',
-          marginBottom: '24px',
-        }}>
-          <Card>
-            <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>
-              Total Value Protected
-            </div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#fff' }}>
-              ${totalValue.toLocaleString()}
-            </div>
-          </Card>
-          <Card>
-            <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>
-              Wallets Tracked
-            </div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#fff' }}>
-              {vaultData.wallets.filter(w => w.address).length}
-            </div>
-          </Card>
-          <Card>
-            <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>
-              Beneficiaries
-            </div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#fff' }}>
-              {vaultData.beneficiaries.filter(b => b.name).length}
-            </div>
-          </Card>
-        </div>
-        
-        {/* Wallets */}
-        <Card style={{ marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '20px' }}>
-            💰 Tracked Wallets
-          </h3>
-          {vaultData.wallets.filter(w => w.address).map((w, i) => {
-            const chain = CHAINS.find(c => c.value === w.chain) || CHAINS[0];
-            const value = (parseFloat(w.balance) || 0) * (PRICES[w.chain] || 0);
-            return (
-              <div key={i} style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '16px',
-                background: 'rgba(255,255,255,0.02)',
-                borderRadius: '12px',
-                marginBottom: '12px',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <div style={{
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '10px',
-                    background: `${chain.color}20`,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '18px',
-                  }}>
-                    {chain.icon}
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 600, color: '#fff' }}>{w.name || 'Unnamed Wallet'}</div>
-                    <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
-                      {w.address.slice(0, 8)}...{w.address.slice(-6)}
-                    </div>
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontWeight: 700, color: '#fff' }}>{w.balance} {w.chain}</div>
-                  <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>
-                    ≈ ${value.toLocaleString()}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </Card>
-        
-        {/* Secrets */}
-        <Card style={{ marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '20px' }}>
-            🗝️ Stored Secrets
-          </h3>
-          {vaultData.secrets.filter(s => s.value).map((s, i) => (
-            <div key={i} style={{
-              padding: '16px',
-              background: 'rgba(255,255,255,0.02)',
-              borderRadius: '12px',
-              marginBottom: '12px',
-            }}>
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '8px',
-              }}>
-                <span style={{ fontWeight: 600, color: '#fff' }}>{s.label || `Secret ${i + 1}`}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowSecret({ ...showSecret, [i]: !showSecret[i] })}
-                >
-                  {showSecret[i] ? 'Hide' : 'Reveal'}
-                </Button>
-              </div>
-              <div style={{
-                fontFamily: 'monospace',
-                fontSize: '13px',
-                color: 'rgba(255,255,255,0.6)',
-                wordBreak: 'break-all',
-              }}>
-                {showSecret[i] ? s.value : '••••••••••••••••••••••••••••••••'}
-              </div>
-            </div>
-          ))}
-        </Card>
-        
-        {/* Beneficiaries */}
-        <Card>
-          <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '20px' }}>
-            👨‍👩‍👧‍👦 Beneficiaries
-          </h3>
-          {vaultData.beneficiaries.filter(b => b.name).map((b, i) => (
-            <div key={i} style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '16px',
-              background: 'rgba(255,255,255,0.02)',
-              borderRadius: '12px',
-              marginBottom: '12px',
-            }}>
-              <div>
-                <div style={{ fontWeight: 600, color: '#fff' }}>{b.name}</div>
-                {b.email && (
-                  <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>{b.email}</div>
-                )}
-              </div>
-              {b.address && (
-                <div style={{
-                  fontSize: '12px',
-                  color: '#a78bfa',
-                  fontFamily: 'monospace',
-                  background: 'rgba(139, 92, 246, 0.1)',
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                }}>
-                  {b.address.slice(0, 6)}...{b.address.slice(-4)}
-                </div>
-              )}
-            </div>
-          ))}
-        </Card>
+        <Button variant={time.urgent ? 'danger' : 'primary'} size="lg" onClick={onCheckIn}>✓ Check In</Button>
       </div>
+    </Card>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '16px', marginBottom: '24px' }}>
+      {[{ l: 'Items', v: total, i: '📦' }, { l: 'Beneficiaries', v: vault.beneficiaries?.length || 0, i: '👥' }, { l: 'Check-in', v: `${vault.settings?.checkInDays || 30}d`, i: '⏰' }, { l: '2FA', v: account.security?.totpEnabled ? 'On' : 'Off', i: '🔐' }].map((s, i) => <Card key={i} style={{ padding: '20px', textAlign: 'center' }}><div style={{ fontSize: '24px', marginBottom: '8px' }}>{s.i}</div><div style={{ fontSize: '20px', fontWeight: 700, color: '#fff' }}>{s.v}</div><div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>{s.l}</div></Card>)}
     </div>
-  );
+    <Card><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Quick Actions</h3><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}><Button variant="secondary" fullWidth onClick={onExport}>📥 Export Backup</Button><Button variant="secondary" fullWidth onClick={() => window.open(STRIPE_PAYMENT_LINK, '_blank')}>💳 Subscription</Button></div></Card>
+  </>;
+};
+
+const ListTab = ({ title, icon, items: initial, fields, onSave, pink }) => {
+  const [items, setItems] = useState(initial);
+  const [changed, setChanged] = useState(false);
+  const [show, setShow] = useState({});
+  const add = () => { const obj = {}; fields.forEach(f => obj[f.key] = ''); setItems([...items, obj]); setChanged(true); };
+  const update = (i, k, v) => { const u = [...items]; u[i][k] = v; setItems(u); setChanged(true); };
+  const remove = i => { setItems(items.filter((_, idx) => idx !== i)); setChanged(true); };
+  const doSave = () => { onSave(items.filter(item => fields.some(f => item[f.key]))); setChanged(false); };
+
+  return <>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+      <div><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff' }}>{icon} {title}</h2></div>
+      <div style={{ display: 'flex', gap: '12px' }}><Button variant="secondary" onClick={add}>+ Add</Button>{changed && <Button variant="success" onClick={doSave}>Save</Button>}</div>
+    </div>
+    {items.length === 0 ? <Card style={{ textAlign: 'center', padding: '60px' }}><div style={{ fontSize: '48px', marginBottom: '16px' }}>{icon}</div><p style={{ color: 'rgba(255,255,255,0.5)', marginBottom: '20px' }}>No items yet</p><Button onClick={add}>Add First Item</Button></Card> : items.map((item, i) => (
+      <Card key={i} style={{ marginBottom: '16px', background: pink ? 'linear-gradient(135deg,rgba(244,114,182,0.05),rgba(15,10,25,0.9))' : undefined }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(fields.length, 4)},1fr) auto`, gap: '12px', alignItems: 'end' }}>
+          {fields.map(f => f.textarea ? null : <div key={f.key} style={{ position: 'relative' }}><Input label={f.label} type={f.secret && !show[`${i}-${f.key}`] ? 'password' : 'text'} value={item[f.key] || ''} onChange={e => update(i, f.key, e.target.value)} placeholder={f.placeholder} style={{ marginBottom: 0 }} />{f.secret && <button onClick={() => setShow({ ...show, [`${i}-${f.key}`]: !show[`${i}-${f.key}`] })} style={{ position: 'absolute', right: 12, top: 32, background: 'none', border: 'none', color: '#a78bfa', cursor: 'pointer' }}>{show[`${i}-${f.key}`] ? '🙈' : '👁️'}</button>}</div>)}
+          <Button variant="ghost" size="sm" onClick={() => remove(i)} style={{ color: '#ef4444' }}>🗑️</Button>
+        </div>
+        {fields.filter(f => f.textarea).map(f => <Input key={f.key} label={f.label} value={item[f.key] || ''} onChange={e => update(i, f.key, e.target.value)} placeholder={f.placeholder} textarea style={{ marginTop: '12px', marginBottom: 0 }} />)}
+      </Card>
+    ))}
+  </>;
+};
+
+const CryptoTab = ({ vault, onSave }) => {
+  const [wallets, setWallets] = useState(vault.crypto?.wallets || []);
+  const [secrets, setSecrets] = useState(vault.crypto?.secrets || []);
+  const [exchanges, setExchanges] = useState(vault.crypto?.exchanges || []);
+  const [changed, setChanged] = useState(false);
+  const [show, setShow] = useState({});
+  const save = () => { onSave({ ...vault, crypto: { wallets: wallets.filter(w => w.address), secrets: secrets.filter(s => s.value), exchanges: exchanges.filter(e => e.name) } }); setChanged(false); };
+
+  return <>
+    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '24px' }}><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff' }}>₿ Crypto & DeFi</h2>{changed && <Button variant="success" onClick={save}>Save</Button>}</div>
+    <Card style={{ marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Wallets</h3><Button variant="secondary" size="sm" onClick={() => { setWallets([...wallets, { name: '', address: '', chain: 'ETH' }]); setChanged(true); }}>+ Add</Button></div>
+      {wallets.map((w, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Name" value={w.name} onChange={e => { const u = [...wallets]; u[i].name = e.target.value; setWallets(u); setChanged(true); }} placeholder="Main" style={{ marginBottom: 0 }} /><Select label="Chain" value={w.chain} onChange={e => { const u = [...wallets]; u[i].chain = e.target.value; setWallets(u); setChanged(true); }} options={CHAINS.map(c => ({ value: c.value, label: `${c.icon} ${c.label}` }))} style={{ marginBottom: 0 }} /><Input label="Address" value={w.address} onChange={e => { const u = [...wallets]; u[i].address = e.target.value; setWallets(u); setChanged(true); }} placeholder="0x..." style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setWallets(wallets.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
+    </Card>
+    <Card style={{ marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>🔐 Seed Phrases & Keys</h3><Button variant="secondary" size="sm" onClick={() => { setSecrets([...secrets, { label: '', value: '' }]); setChanged(true); }}>+ Add</Button></div>
+      {secrets.map((s, i) => <div key={i} style={{ padding: '16px', background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.1)', borderRadius: '12px', marginBottom: '12px' }}><Input label="Label" value={s.label} onChange={e => { const u = [...secrets]; u[i].label = e.target.value; setSecrets(u); setChanged(true); }} placeholder="Ledger Seed" /><div style={{ position: 'relative' }}><Input label="Secret" type={show[i] ? 'text' : 'password'} value={s.value} onChange={e => { const u = [...secrets]; u[i].value = e.target.value; setSecrets(u); setChanged(true); }} placeholder="Enter seed..." textarea style={{ marginBottom: 0 }} /><button onClick={() => setShow({ ...show, [i]: !show[i] })} style={{ position: 'absolute', right: 12, top: 32, background: 'none', border: 'none', color: '#a78bfa', cursor: 'pointer' }}>{show[i] ? '🙈' : '👁️'}</button></div><Button variant="ghost" size="sm" onClick={() => { setSecrets(secrets.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444', marginTop: '12px' }}>🗑️ Remove</Button></div>)}
+    </Card>
+    <Card>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Exchanges</h3><Button variant="secondary" size="sm" onClick={() => { setExchanges([...exchanges, { name: '', email: '', notes: '' }]); setChanged(true); }}>+ Add</Button></div>
+      {exchanges.map((e, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Exchange" value={e.name} onChange={ev => { const u = [...exchanges]; u[i].name = ev.target.value; setExchanges(u); setChanged(true); }} placeholder="Coinbase" style={{ marginBottom: 0 }} /><Input label="Email" value={e.email} onChange={ev => { const u = [...exchanges]; u[i].email = ev.target.value; setExchanges(u); setChanged(true); }} placeholder="email@..." style={{ marginBottom: 0 }} /><Input label="Notes" value={e.notes} onChange={ev => { const u = [...exchanges]; u[i].notes = ev.target.value; setExchanges(u); setChanged(true); }} placeholder="2FA..." style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setExchanges(exchanges.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
+    </Card>
+  </>;
+};
+
+const FinanceTab = ({ vault, onSave }) => {
+  const [banks, setBanks] = useState(vault.finance?.bankAccounts || []);
+  const [investments, setInvestments] = useState(vault.finance?.investments || []);
+  const [debts, setDebts] = useState(vault.finance?.debts || []);
+  const [changed, setChanged] = useState(false);
+  const save = () => { onSave({ ...vault, finance: { bankAccounts: banks.filter(b => b.bank), investments: investments.filter(i => i.institution), debts: debts.filter(d => d.creditor) } }); setChanged(false); };
+
+  return <>
+    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '24px' }}><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff' }}>🏦 Finance</h2>{changed && <Button variant="success" onClick={save}>Save</Button>}</div>
+    <Card style={{ marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Bank Accounts</h3><Button variant="secondary" size="sm" onClick={() => { setBanks([...banks, { bank: '', type: 'checking', accountNum: '' }]); setChanged(true); }}>+ Add</Button></div>
+      {banks.map((b, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Bank" value={b.bank} onChange={e => { const u = [...banks]; u[i].bank = e.target.value; setBanks(u); setChanged(true); }} placeholder="Chase" style={{ marginBottom: 0 }} /><Select label="Type" value={b.type} onChange={e => { const u = [...banks]; u[i].type = e.target.value; setBanks(u); setChanged(true); }} options={[{ value: 'checking', label: 'Checking' }, { value: 'savings', label: 'Savings' }]} style={{ marginBottom: 0 }} /><Input label="Last 4" value={b.accountNum} onChange={e => { const u = [...banks]; u[i].accountNum = e.target.value; setBanks(u); setChanged(true); }} placeholder="1234" style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setBanks(banks.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
+    </Card>
+    <Card style={{ marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Investments</h3><Button variant="secondary" size="sm" onClick={() => { setInvestments([...investments, { institution: '', type: '', notes: '' }]); setChanged(true); }}>+ Add</Button></div>
+      {investments.map((inv, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Institution" value={inv.institution} onChange={e => { const u = [...investments]; u[i].institution = e.target.value; setInvestments(u); setChanged(true); }} placeholder="Fidelity" style={{ marginBottom: 0 }} /><Input label="Type" value={inv.type} onChange={e => { const u = [...investments]; u[i].type = e.target.value; setInvestments(u); setChanged(true); }} placeholder="401k" style={{ marginBottom: 0 }} /><Input label="Notes" value={inv.notes} onChange={e => { const u = [...investments]; u[i].notes = e.target.value; setInvestments(u); setChanged(true); }} placeholder="Login..." style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setInvestments(investments.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
+    </Card>
+    <Card>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#ef4444' }}>⚠️ Debts</h3><Button variant="secondary" size="sm" onClick={() => { setDebts([...debts, { creditor: '', type: '', amount: '' }]); setChanged(true); }}>+ Add</Button></div>
+      {debts.map((d, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Creditor" value={d.creditor} onChange={e => { const u = [...debts]; u[i].creditor = e.target.value; setDebts(u); setChanged(true); }} placeholder="Mortgage" style={{ marginBottom: 0 }} /><Input label="Type" value={d.type} onChange={e => { const u = [...debts]; u[i].type = e.target.value; setDebts(u); setChanged(true); }} placeholder="Home Loan" style={{ marginBottom: 0 }} /><Input label="Amount" value={d.amount} onChange={e => { const u = [...debts]; u[i].amount = e.target.value; setDebts(u); setChanged(true); }} placeholder="$50,000" style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setDebts(debts.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
+    </Card>
+  </>;
+};
+
+const WishesTab = ({ vault, onSave }) => {
+  const [wishes, setWishes] = useState(vault.finalWishes || {});
+  const [changed, setChanged] = useState(false);
+  const update = (k, v) => { setWishes({ ...wishes, [k]: v }); setChanged(true); };
+  const save = () => { onSave({ ...vault, finalWishes: wishes }); setChanged(false); };
+
+  return <>
+    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '24px' }}><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff' }}>📝 Final Wishes</h2>{changed && <Button variant="success" onClick={save}>Save</Button>}</div>
+    <Card>
+      <Input label="Funeral Preferences" value={wishes.funeral || ''} onChange={e => update('funeral', e.target.value)} placeholder="Burial vs cremation, location..." textarea />
+      <Input label="Organ Donation" value={wishes.organDonation || ''} onChange={e => update('organDonation', e.target.value)} placeholder="Yes/No, specific wishes..." textarea />
+      <Input label="Special Requests" value={wishes.specialRequests || ''} onChange={e => update('specialRequests', e.target.value)} placeholder="Music, readings..." textarea />
+      <Input label="General Instructions" value={wishes.generalInstructions || ''} onChange={e => update('generalInstructions', e.target.value)} placeholder="Other instructions..." textarea style={{ marginBottom: 0 }} />
+    </Card>
+  </>;
+};
+
+const SettingsTab = ({ vault, account, onSave, onShowSecurity }) => {
+  const [checkIn, setCheckIn] = useState((vault.settings?.checkInDays || 30).toString());
+  const [grace, setGrace] = useState((vault.settings?.graceDays || 7).toString());
+  const [changed, setChanged] = useState(false);
+  const save = () => { onSave({ ...vault, settings: { ...vault.settings, checkInDays: parseInt(checkIn), graceDays: parseInt(grace) } }); setChanged(false); };
+
+  return <>
+    <h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff', marginBottom: '24px' }}>⚙️ Settings</h2>
+    <Card style={{ marginBottom: '24px' }}>
+      <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Dead Man's Switch</h3>
+      <Select label="Check-in Frequency" value={checkIn} onChange={e => { setCheckIn(e.target.value); setChanged(true); }} options={[{ value: '7', label: 'Every 7 days' }, { value: '14', label: 'Every 14 days' }, { value: '30', label: 'Every 30 days' }, { value: '60', label: 'Every 60 days' }, { value: '90', label: 'Every 90 days' }]} />
+      <Select label="Grace Period" value={grace} onChange={e => { setGrace(e.target.value); setChanged(true); }} options={[{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }]} style={{ marginBottom: 0 }} />
+      {changed && <Button variant="success" onClick={save} style={{ marginTop: '16px' }}>Save</Button>}
+    </Card>
+    <Card style={{ marginBottom: '24px' }}>
+      <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Security</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '12px' }}>
+        <div><div style={{ fontWeight: 600, color: '#fff' }}>Two-Factor Authentication</div><div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>{account.security?.totpEnabled ? '✅ Enabled' : '❌ Disabled'}</div></div>
+        <Button variant={account.security?.totpEnabled ? 'secondary' : 'primary'} size="sm" onClick={onShowSecurity}>{account.security?.totpEnabled ? 'Manage' : 'Enable'}</Button>
+      </div>
+    </Card>
+    <Card>
+      <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Subscription</h3>
+      <Button variant="secondary" fullWidth onClick={() => window.open(STRIPE_PAYMENT_LINK, '_blank')}>💳 Manage on Stripe</Button>
+    </Card>
+  </>;
 };
 
 // ============================================
-// BENEFICIARY CLAIM PAGE
+// MODALS
+// ============================================
+const SecurityModal = ({ isOpen, onClose, account, onUpdate }) => {
+  const [step, setStep] = useState(account.security?.totpEnabled ? 'manage' : 'setup');
+  const [secret] = useState(account.security?.totpSecret || CryptoUtils.genTOTPSecret());
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [backupCodes, setBackupCodes] = useState(null);
+
+  const enable = () => {
+    if (!CryptoUtils.verifyTOTP(secret, code)) { setError('Invalid code'); return; }
+    const codes = CryptoUtils.genBackupCodes();
+    onUpdate({ ...account, security: { totpEnabled: true, totpSecret: secret, backupCodes: codes } });
+    setBackupCodes(codes);
+    setStep('backup');
+  };
+
+  const disable = () => {
+    onUpdate({ ...account, security: { totpEnabled: false, totpSecret: null, backupCodes: [] } });
+    onClose();
+  };
+
+  return <Modal isOpen={isOpen} onClose={onClose} title="Two-Factor Authentication">
+    {step === 'setup' && <>
+      <div style={{ textAlign: 'center', marginBottom: '24px' }}><div style={{ fontSize: '48px', marginBottom: '16px' }}>🔐</div><p style={{ color: 'rgba(255,255,255,0.6)' }}>Add extra security to your account</p></div>
+      <div style={{ padding: '20px', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', marginBottom: '24px' }}>
+        <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)', marginBottom: '12px' }}>1. Add to your authenticator app:</p>
+        <code style={{ display: 'block', padding: '12px', background: 'rgba(139,92,246,0.1)', borderRadius: '8px', color: '#a78bfa', fontSize: '12px', letterSpacing: '2px', textAlign: 'center', wordBreak: 'break-all' }}>{secret}</code>
+      </div>
+      <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)', marginBottom: '12px' }}>2. Enter the 6-digit code:</p>
+      <Input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="000000" error={error} />
+      <Button fullWidth onClick={enable} disabled={code.length !== 6}>Enable 2FA</Button>
+    </>}
+    {step === 'backup' && <>
+      <div style={{ textAlign: 'center', marginBottom: '24px' }}><div style={{ fontSize: '48px', marginBottom: '16px' }}>✅</div><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#10b981' }}>2FA Enabled!</h3></div>
+      <div style={{ padding: '20px', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: '12px', marginBottom: '24px' }}>
+        <p style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '12px' }}>⚠️ Save these backup codes:</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '8px' }}>{backupCodes?.map((c, i) => <code key={i} style={{ padding: '8px', background: 'rgba(0,0,0,0.2)', borderRadius: '6px', textAlign: 'center', color: '#fff', fontSize: '13px' }}>{c}</code>)}</div>
+      </div>
+      <Button fullWidth onClick={onClose}>Done</Button>
+    </>}
+    {step === 'manage' && <>
+      <div style={{ padding: '20px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: '12px', marginBottom: '24px' }}><p style={{ fontSize: '14px', color: '#10b981', margin: 0 }}>✅ 2FA is enabled</p></div>
+      <Button variant="danger" fullWidth onClick={disable}>Disable 2FA</Button>
+    </>}
+  </Modal>;
+};
+
+const ExportModal = ({ isOpen, onClose, account }) => {
+  const data = JSON.stringify(account, null, 2);
+  const download = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' })); a.download = `inherichain-backup-${account.email}-${new Date().toISOString().split('T')[0]}.json`; a.click(); };
+  return <Modal isOpen={isOpen} onClose={onClose} title="Export Backup">
+    <div style={{ padding: '16px', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: '12px', marginBottom: '24px' }}><p style={{ fontSize: '13px', color: '#fbbf24', margin: 0 }}>⚠️ Share this backup AND your master password with beneficiaries securely.</p></div>
+    <Button fullWidth onClick={download}>📥 Download Backup</Button>
+    <Button variant="secondary" fullWidth onClick={() => { navigator.clipboard.writeText(data); alert('Copied!'); }} style={{ marginTop: '12px' }}>📋 Copy to Clipboard</Button>
+  </Modal>;
+};
+
+// ============================================
+// BENEFICIARY PAGE
 // ============================================
 const BeneficiaryPage = ({ onBack }) => {
   const [password, setPassword] = useState('');
-  const [encryptedData, setEncryptedData] = useState('');
-  const [decryptedVault, setDecryptedVault] = useState(null);
+  const [data, setData] = useState('');
+  const [vault, setVault] = useState(null);
   const [error, setError] = useState('');
-  const [isDecrypting, setIsDecrypting] = useState(false);
-  const [showSecrets, setShowSecrets] = useState({});
-  
-  const handleDecrypt = async () => {
-    setError('');
-    setIsDecrypting(true);
-    
+  const [loading, setLoading] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [show, setShow] = useState({});
+
+  const decrypt = async () => {
+    if (!accepted) { alert(`Accept the ${PLATFORM_FEE_PERCENT}% fee first`); return; }
+    setError(''); setLoading(true);
     try {
-      const parsed = JSON.parse(encryptedData);
-      const decrypted = await CryptoUtils.decrypt(parsed, password);
-      setDecryptedVault(decrypted);
-    } catch (e) {
-      setError('Decryption failed. Check your password and encrypted data.');
-    } finally {
-      setIsDecrypting(false);
-    }
+      const parsed = JSON.parse(data);
+      const v = parsed.encryptedVault || parsed;
+      setVault(await CryptoUtils.decrypt(v, password));
+    } catch { setError('Decryption failed'); }
+    finally { setLoading(false); }
   };
-  
-  return (
-    <div style={{
-      position: 'relative',
-      zIndex: 1,
-      minHeight: '100vh',
-      padding: '40px',
-    }}>
-      <div style={{ maxWidth: '700px', margin: '0 auto' }}>
-        <Button variant="ghost" onClick={onBack} style={{ marginBottom: '24px' }}>
-          ← Back
-        </Button>
+
+  const handleFile = e => { const f = e.target.files[0]; if (f) { const r = new FileReader(); r.onload = e => setData(e.target.result); r.readAsText(f); } };
+
+  if (vault) return (
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh', padding: '40px' }}>
+      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+        <Button variant="ghost" onClick={() => { setVault(null); setPassword(''); setData(''); }} style={{ marginBottom: '24px' }}>← Start Over</Button>
+        <div style={{ padding: '20px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '16px', marginBottom: '24px' }}><p style={{ fontSize: '14px', color: '#10b981', margin: 0 }}>✅ <strong>Vault unlocked.</strong> Handle with care.</p></div>
         
-        <Logo size="sm" />
+        {(vault.finalWishes?.funeral || vault.finalWishes?.generalInstructions) && <Card style={{ marginBottom: '24px' }}><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>📝 Final Wishes</h3>{vault.finalWishes.funeral && <div style={{ marginBottom: '16px' }}><div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '4px' }}>Funeral</div><p style={{ color: 'rgba(255,255,255,0.8)', whiteSpace: 'pre-wrap' }}>{vault.finalWishes.funeral}</p></div>}{vault.finalWishes.organDonation && <div style={{ marginBottom: '16px' }}><div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '4px' }}>Organ Donation</div><p style={{ color: 'rgba(255,255,255,0.8)', whiteSpace: 'pre-wrap' }}>{vault.finalWishes.organDonation}</p></div>}{vault.finalWishes.specialRequests && <div style={{ marginBottom: '16px' }}><div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '4px' }}>Special Requests</div><p style={{ color: 'rgba(255,255,255,0.8)', whiteSpace: 'pre-wrap' }}>{vault.finalWishes.specialRequests}</p></div>}{vault.finalWishes.generalInstructions && <div><div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '4px' }}>Instructions</div><p style={{ color: 'rgba(255,255,255,0.8)', whiteSpace: 'pre-wrap' }}>{vault.finalWishes.generalInstructions}</p></div>}</Card>}
         
-        <h1 style={{
-          fontSize: '32px',
-          fontWeight: 700,
-          color: '#fff',
-          marginTop: '24px',
-          marginBottom: '16px',
-        }}>
-          {decryptedVault ? '🔓 Vault Unlocked' : '🔐 Claim Inheritance'}
-        </h1>
+        {vault.messages?.filter(m => m.message).length > 0 && <Card style={{ marginBottom: '24px' }}><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>💌 Messages</h3>{vault.messages.filter(m => m.message).map((m, i) => <div key={i} style={{ padding: '16px', background: 'rgba(244,114,182,0.05)', border: '1px solid rgba(244,114,182,0.1)', borderRadius: '12px', marginBottom: '12px' }}><div style={{ fontWeight: 600, color: '#f472b6', marginBottom: '12px' }}>To: {m.recipient}</div><div style={{ color: 'rgba(255,255,255,0.8)', whiteSpace: 'pre-wrap' }}>{m.message}</div></div>)}</Card>}
         
-        {!decryptedVault ? (
-          <Card>
-            <p style={{
-              fontSize: '14px',
-              color: 'rgba(255,255,255,0.6)',
-              marginBottom: '24px',
-              lineHeight: 1.7,
-            }}>
-              If you've been designated as a beneficiary and the vault owner has been inactive beyond their 
-              check-in period, you can decrypt their vault using the master password they shared with you.
-            </p>
-            
-            <Input
-              label="Encrypted Vault Data"
-              value={encryptedData}
-              onChange={(e) => setEncryptedData(e.target.value)}
-              placeholder='Paste the encrypted vault JSON here...'
-              textarea
-            />
-            
-            <Input
-              label="Master Password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter the password shared by vault owner"
-            />
-            
-            {error && (
-              <div style={{
-                padding: '16px',
-                background: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid rgba(239, 68, 68, 0.2)',
-                borderRadius: '12px',
-                marginBottom: '24px',
-              }}>
-                <p style={{ fontSize: '13px', color: '#ef4444', margin: 0 }}>❌ {error}</p>
-              </div>
-            )}
-            
-            <Button
-              fullWidth
-              onClick={handleDecrypt}
-              disabled={!password || !encryptedData || isDecrypting}
-            >
-              {isDecrypting ? '🔐 Decrypting...' : 'Unlock Vault'}
-            </Button>
-          </Card>
-        ) : (
-          <>
-            <div style={{
-              padding: '20px',
-              background: 'rgba(16, 185, 129, 0.1)',
-              border: '1px solid rgba(16, 185, 129, 0.3)',
-              borderRadius: '16px',
-              marginBottom: '24px',
-            }}>
-              <p style={{ fontSize: '14px', color: '#10b981', margin: 0 }}>
-                ✅ <strong>Vault successfully decrypted.</strong> Below is all the information you need to access the crypto assets.
-              </p>
-            </div>
-            
-            {/* Instructions */}
-            {decryptedVault.instructions && (
-              <Card style={{ marginBottom: '24px' }}>
-                <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>
-                  📝 Instructions from Vault Owner
-                </h3>
-                <p style={{ color: 'rgba(255,255,255,0.7)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
-                  {decryptedVault.instructions}
-                </p>
-              </Card>
-            )}
-            
-            {/* Wallets */}
-            <Card style={{ marginBottom: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '20px' }}>
-                💰 Wallet Addresses
-              </h3>
-              {decryptedVault.wallets?.filter(w => w.address).map((w, i) => {
-                const chain = CHAINS.find(c => c.value === w.chain) || CHAINS[0];
-                return (
-                  <div key={i} style={{
-                    padding: '16px',
-                    background: 'rgba(255,255,255,0.02)',
-                    borderRadius: '12px',
-                    marginBottom: '12px',
-                  }}>
-                    <div style={{ fontWeight: 600, color: '#fff', marginBottom: '8px' }}>
-                      {chain.icon} {w.name || 'Wallet'} ({w.chain})
-                    </div>
-                    <div style={{
-                      fontFamily: 'monospace',
-                      fontSize: '13px',
-                      color: '#a78bfa',
-                      wordBreak: 'break-all',
-                      background: 'rgba(139, 92, 246, 0.1)',
-                      padding: '12px',
-                      borderRadius: '8px',
-                    }}>
-                      {w.address}
-                    </div>
-                    {w.balance && (
-                      <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', marginTop: '8px' }}>
-                        Approximate balance: {w.balance} {w.chain}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </Card>
-            
-            {/* Secrets */}
-            <Card style={{ marginBottom: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#fff', marginBottom: '20px' }}>
-                🗝️ Recovery Secrets
-              </h3>
-              <div style={{
-                padding: '16px',
-                background: 'rgba(251, 191, 36, 0.1)',
-                border: '1px solid rgba(251, 191, 36, 0.2)',
-                borderRadius: '12px',
-                marginBottom: '20px',
-              }}>
-                <p style={{ fontSize: '13px', color: '#fbbf24', margin: 0 }}>
-                  ⚠️ <strong>Sensitive information.</strong> Handle these secrets with extreme care. 
-                  Never share them with anyone or enter them on suspicious websites.
-                </p>
-              </div>
-              
-              {decryptedVault.secrets?.filter(s => s.value).map((s, i) => (
-                <div key={i} style={{
-                  padding: '16px',
-                  background: 'rgba(255,255,255,0.02)',
-                  borderRadius: '12px',
-                  marginBottom: '12px',
-                }}>
-                  <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: '12px',
-                  }}>
-                    <span style={{ fontWeight: 600, color: '#fff' }}>{s.label || `Secret ${i + 1}`}</span>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setShowSecrets({ ...showSecrets, [i]: !showSecrets[i] })}
-                    >
-                      {showSecrets[i] ? '🙈 Hide' : '👁️ Reveal'}
-                    </Button>
-                  </div>
-                  <div style={{
-                    fontFamily: 'monospace',
-                    fontSize: '13px',
-                    color: showSecrets[i] ? '#10b981' : 'rgba(255,255,255,0.3)',
-                    wordBreak: 'break-all',
-                    background: showSecrets[i] ? 'rgba(16, 185, 129, 0.1)' : 'rgba(0,0,0,0.2)',
-                    padding: '16px',
-                    borderRadius: '8px',
-                    whiteSpace: 'pre-wrap',
-                  }}>
-                    {showSecrets[i] ? s.value : '••••••••••••••••••••••••••••••••••••••••••••••••'}
-                  </div>
-                </div>
-              ))}
-            </Card>
-            
-            <Button variant="secondary" fullWidth onClick={() => {
-              setDecryptedVault(null);
-              setPassword('');
-              setEncryptedData('');
-            }}>
-              Clear & Start Over
-            </Button>
-          </>
-        )}
+        {vault.contacts?.filter(c => c.name).length > 0 && <Card style={{ marginBottom: '24px' }}><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>📞 Contacts</h3>{vault.contacts.filter(c => c.name).map((c, i) => <div key={i} style={{ padding: '12px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', marginBottom: '12px' }}><div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#fff' }}>{c.name}</span><span style={{ fontSize: '12px', color: '#a78bfa' }}>{c.role}</span></div>{c.phone && <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }}>📱 {c.phone}</div>}{c.email && <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }}>✉️ {c.email}</div>}</div>)}</Card>}
+        
+        {(vault.crypto?.wallets?.length > 0 || vault.crypto?.secrets?.length > 0) && <Card style={{ marginBottom: '24px' }}><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>₿ Crypto</h3>{vault.crypto.wallets?.filter(w => w.address).map((w, i) => <div key={i} style={{ padding: '12px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', marginBottom: '12px' }}><div style={{ fontWeight: 600, color: '#fff' }}>{w.name || 'Wallet'} ({w.chain})</div><div style={{ fontFamily: 'monospace', fontSize: '12px', color: '#a78bfa', wordBreak: 'break-all' }}>{w.address}</div></div>)}{vault.crypto.secrets?.filter(s => s.value).map((s, i) => <div key={i} style={{ padding: '12px', background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.1)', borderRadius: '8px', marginBottom: '12px' }}><div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}><span style={{ fontWeight: 600, color: '#fff' }}>{s.label || 'Secret'}</span><Button variant="ghost" size="sm" onClick={() => setShow({ ...show, [i]: !show[i] })}>{show[i] ? '🙈' : '👁️'}</Button></div><div style={{ fontFamily: 'monospace', fontSize: '12px', color: show[i] ? '#10b981' : 'rgba(255,255,255,0.3)', wordBreak: 'break-all' }}>{show[i] ? s.value : '••••••••••••••••••••••••'}</div></div>)}</Card>}
+        
+        {vault.passwords?.filter(p => p.site).length > 0 && <Card style={{ marginBottom: '24px' }}><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>🔑 Passwords</h3>{vault.passwords.filter(p => p.site).map((p, i) => <div key={i} style={{ padding: '12px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', marginBottom: '12px' }}><div style={{ fontWeight: 600, color: '#fff', marginBottom: '4px' }}>{p.site}</div><div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>User: {p.username}</div><div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}><span style={{ fontSize: '12px', fontFamily: 'monospace', color: show[`p${i}`] ? '#10b981' : 'rgba(255,255,255,0.3)' }}>{show[`p${i}`] ? p.password : '••••••••'}</span><Button variant="ghost" size="sm" onClick={() => setShow({ ...show, [`p${i}`]: !show[`p${i}`] })}>{show[`p${i}`] ? '🙈' : '👁️'}</Button></div>{p.notes && <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', marginTop: '8px' }}>{p.notes}</div>}</div>)}</Card>}
+        
+        {vault.documents?.filter(d => d.name).length > 0 && <Card style={{ marginBottom: '24px' }}><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>📄 Documents</h3>{vault.documents.filter(d => d.name).map((d, i) => <div key={i} style={{ padding: '12px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', marginBottom: '12px' }}><div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#fff' }}>{d.name}</span><span style={{ fontSize: '11px', color: '#a78bfa' }}>{d.type}</span></div>{d.location && <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>📍 {d.location}</div>}{d.details && <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)', marginTop: '8px' }}>{d.details}</div>}</div>)}</Card>}
+        
+        {vault.beneficiaries?.filter(b => b.name).length > 0 && <Card><h3 style={{ fontSize: '18px', fontWeight: 700, color: '#fff', marginBottom: '16px' }}>👥 Beneficiaries</h3>{vault.beneficiaries.filter(b => b.name).map((b, i) => <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', marginBottom: '12px' }}><div><div style={{ fontWeight: 600, color: '#fff' }}>{b.name}</div>{b.email && <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>{b.email}</div>}</div><div style={{ fontSize: '18px', fontWeight: 700, color: '#a78bfa' }}>{b.share}%</div></div>)}</Card>}
       </div>
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
+      <Card style={{ maxWidth: '500px', width: '100%' }}>
+        <Button variant="ghost" onClick={onBack} style={{ marginBottom: '24px' }}>← Back</Button>
+        <div style={{ textAlign: 'center', marginBottom: '32px' }}><Logo size="lg" /><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff', marginTop: '24px' }}>Claim Inheritance</h2><p style={{ color: 'rgba(255,255,255,0.5)' }}>Enter the vault backup and master password</p></div>
+        <div style={{ marginBottom: '20px' }}><label style={{ display: 'block', fontSize: '11px', color: 'rgba(167,139,250,0.8)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: '8px', fontWeight: 600 }}>Upload Backup File</label><input type="file" accept=".json" onChange={handleFile} style={{ width: '100%', padding: '12px', background: '#0a0a0f', border: '2px solid rgba(255,255,255,0.1)', borderRadius: '12px', color: '#fff' }} /></div>
+        <Input label="Or Paste Vault Data" value={data} onChange={e => setData(e.target.value)} placeholder="Paste JSON..." textarea />
+        <Input label="Master Password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter password" error={error} />
+        <div style={{ padding: '16px', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: '12px', marginBottom: '24px' }}><label style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', cursor: 'pointer' }}><input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)} style={{ marginTop: '4px' }} /><span style={{ fontSize: '13px', color: '#fbbf24' }}>I accept the <strong>{PLATFORM_FEE_PERCENT}% platform fee</strong> on inherited assets.</span></label></div>
+        <Button fullWidth onClick={decrypt} disabled={!password || !data || loading || !accepted}>{loading ? 'Decrypting...' : '🔓 Unlock Vault'}</Button>
+      </Card>
     </div>
   );
 };
@@ -1705,109 +593,50 @@ const BeneficiaryPage = ({ onBack }) => {
 // MAIN APP
 // ============================================
 export default function App() {
-  const [view, setView] = useState('landing');
-  const [showDisclaimer, setShowDisclaimer] = useState(false);
-  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false);
+  const [page, setPage] = useState('login');
+  const [account, setAccount] = useState(null);
   const [vaultData, setVaultData] = useState(null);
-  const [settings, setSettings] = useState({ checkInDays: 30, graceDays: 7 });
-  const [encryptedVault, setEncryptedVault] = useState(null);
-  
-  const handleGetStarted = () => {
-    if (!disclaimerAccepted) {
-      setShowDisclaimer(true);
-    } else {
-      setView('setup');
+  const [password, setPassword] = useState('');
+
+  // Check for existing session on mount
+  useEffect(() => {
+    const session = Storage.getSession();
+    if (session?.email) {
+      const acc = Storage.getAccount(session.email);
+      if (acc) {
+        // User has session but needs to login again for password
+        setPage('login');
+      }
     }
+  }, []);
+
+  const handleLogin = ({ account: acc, vaultData: vault, password: pwd }) => {
+    setAccount(acc);
+    setVaultData(vault);
+    setPassword(pwd);
+    setPage('dashboard');
   };
-  
-  const handleAcceptDisclaimer = () => {
-    setDisclaimerAccepted(true);
-    setShowDisclaimer(false);
-    setView('setup');
+
+  const handleLogout = () => {
+    Storage.clearSession();
+    setAccount(null);
+    setVaultData(null);
+    setPassword('');
+    setPage('login');
   };
-  
-  const handleVaultCreated = ({ encrypted, vaultData: data, settings: s }) => {
-    setEncryptedVault(encrypted);
-    setVaultData(data);
-    setSettings(s);
-    setView('dashboard');
-    
-    // Log encrypted vault for user to save
-    console.log('=== SAVE THIS ENCRYPTED VAULT DATA ===');
-    console.log(JSON.stringify(encrypted));
-    console.log('======================================');
+
+  const handleUpdate = ({ account: acc, vaultData: vault }) => {
+    setAccount(acc);
+    if (vault) setVaultData(vault);
   };
-  
+
   return (
-    <div style={{
-      minHeight: '100vh',
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-      color: '#fff',
-      overflow: 'hidden',
-    }}>
-      <NeuralNebula />
-      
-      <DisclaimerModal 
-        isOpen={showDisclaimer} 
-        onAccept={handleAcceptDisclaimer} 
-      />
-      
-      {view === 'landing' && (
-        <LandingPage
-          onGetStarted={handleGetStarted}
-          onBeneficiary={() => setView('beneficiary')}
-        />
-      )}
-      
-      {view === 'setup' && (
-        <SetupWizard
-          onComplete={handleVaultCreated}
-          onBack={() => setView('landing')}
-        />
-      )}
-      
-      {view === 'dashboard' && vaultData && (
-        <OwnerDashboard
-          vaultData={vaultData}
-          settings={settings}
-          encryptedVault={encryptedVault}
-          onCheckIn={() => console.log('Checked in!')}
-          onLogout={() => {
-            setVaultData(null);
-            setView('landing');
-          }}
-        />
-      )}
-      
-      {view === 'beneficiary' && (
-        <BeneficiaryPage onBack={() => setView('landing')} />
-      )}
-      
-      {/* Export encrypted vault modal trigger */}
-      {view === 'dashboard' && encryptedVault && (
-        <div style={{
-          position: 'fixed',
-          bottom: '24px',
-          right: '24px',
-          zIndex: 100,
-        }}>
-          <Button
-            variant="secondary"
-            onClick={() => {
-              const data = JSON.stringify(encryptedVault, null, 2);
-              const blob = new Blob([data], { type: 'application/json' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = 'inherichain-vault-encrypted.json';
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-          >
-            📥 Export Encrypted Vault
-          </Button>
-        </div>
-      )}
+    <div style={{ minHeight: '100vh', fontFamily: 'Inter,-apple-system,sans-serif', color: '#fff' }}>
+      <Background />
+      {page === 'login' && <LoginPage onLogin={handleLogin} onSignup={() => setPage('signup')} onBeneficiary={() => setPage('beneficiary')} />}
+      {page === 'signup' && <SignupPage onSignup={handleLogin} onLogin={() => setPage('login')} onBeneficiary={() => setPage('beneficiary')} />}
+      {page === 'dashboard' && account && <Dashboard account={account} vaultData={vaultData} password={password} onLogout={handleLogout} onUpdate={handleUpdate} />}
+      {page === 'beneficiary' && <BeneficiaryPage onBack={() => setPage('login')} />}
     </div>
   );
 }
