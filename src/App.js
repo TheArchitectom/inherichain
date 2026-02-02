@@ -113,12 +113,12 @@ const Background = () => {
   const ref = useRef();
   useEffect(() => {
     const c = ref.current, ctx = c.getContext('2d');
-    let id, particles = [], t = 0;
+    let id, particles = [];
     const resize = () => { c.width = window.innerWidth; c.height = window.innerHeight; };
     resize(); window.addEventListener('resize', resize);
     for (let i = 0; i < 40; i++) particles.push({ x: Math.random() * c.width, y: Math.random() * c.height, vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3, r: Math.random() * 2 + 1, color: ['#8b5cf6', '#06b6d4', '#f472b6'][i % 3] });
     const animate = () => {
-      t += 0.005; ctx.fillStyle = 'rgba(10,10,15,0.15)'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = 'rgba(10,10,15,0.15)'; ctx.fillRect(0, 0, c.width, c.height);
       particles.forEach((p, i) => {
         p.x += p.vx; p.y += p.vy;
         if (p.x < 0) p.x = c.width; if (p.x > c.width) p.x = 0;
@@ -563,30 +563,6 @@ const CryptoTab = ({ vault, onSave }) => {
     <Card>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Exchanges</h3><Button variant="secondary" size="sm" onClick={() => { setExchanges([...exchanges, { name: '', email: '', notes: '' }]); setChanged(true); }}>+ Add</Button></div>
       {exchanges.map((e, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Exchange" value={e.name} onChange={ev => { const u = [...exchanges]; u[i].name = ev.target.value; setExchanges(u); setChanged(true); }} placeholder="Coinbase" style={{ marginBottom: 0 }} /><Input label="Email" value={e.email} onChange={ev => { const u = [...exchanges]; u[i].email = ev.target.value; setExchanges(u); setChanged(true); }} placeholder="email@..." style={{ marginBottom: 0 }} /><Input label="Notes" value={e.notes} onChange={ev => { const u = [...exchanges]; u[i].notes = ev.target.value; setExchanges(u); setChanged(true); }} placeholder="2FA..." style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setExchanges(exchanges.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
-    </Card>
-  </>;
-};
-
-const FinanceTab = ({ vault, onSave }) => {
-  const [banks, setBanks] = useState(vault.finance?.bankAccounts || []);
-  const [investments, setInvestments] = useState(vault.finance?.investments || []);
-  const [debts, setDebts] = useState(vault.finance?.debts || []);
-  const [changed, setChanged] = useState(false);
-  const save = () => { onSave({ ...vault, finance: { bankAccounts: banks.filter(b => b.bank), investments: investments.filter(i => i.institution), debts: debts.filter(d => d.creditor) } }); setChanged(false); };
-
-  return <>
-    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '24px' }}><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff' }}>🏦 Finance</h2>{changed && <Button variant="success" onClick={save}>Save</Button>}</div>
-    <Card style={{ marginBottom: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Bank Accounts</h3><Button variant="secondary" size="sm" onClick={() => { setBanks([...banks, { bank: '', type: 'checking', accountNum: '' }]); setChanged(true); }}>+ Add</Button></div>
-      {banks.map((b, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Bank" value={b.bank} onChange={e => { const u = [...banks]; u[i].bank = e.target.value; setBanks(u); setChanged(true); }} placeholder="Chase" style={{ marginBottom: 0 }} /><Select label="Type" value={b.type} onChange={e => { const u = [...banks]; u[i].type = e.target.value; setBanks(u); setChanged(true); }} options={[{ value: 'checking', label: 'Checking' }, { value: 'savings', label: 'Savings' }]} style={{ marginBottom: 0 }} /><Input label="Last 4" value={b.accountNum} onChange={e => { const u = [...banks]; u[i].accountNum = e.target.value; setBanks(u); setChanged(true); }} placeholder="1234" style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setBanks(banks.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
-    </Card>
-    <Card style={{ marginBottom: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>Investments</h3><Button variant="secondary" size="sm" onClick={() => { setInvestments([...investments, { institution: '', type: '', notes: '' }]); setChanged(true); }}>+ Add</Button></div>
-      {investments.map((inv, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Institution" value={inv.institution} onChange={e => { const u = [...investments]; u[i].institution = e.target.value; setInvestments(u); setChanged(true); }} placeholder="Fidelity" style={{ marginBottom: 0 }} /><Input label="Type" value={inv.type} onChange={e => { const u = [...investments]; u[i].type = e.target.value; setInvestments(u); setChanged(true); }} placeholder="401k" style={{ marginBottom: 0 }} /><Input label="Notes" value={inv.notes} onChange={e => { const u = [...investments]; u[i].notes = e.target.value; setInvestments(u); setChanged(true); }} placeholder="Login..." style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setInvestments(investments.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
-    </Card>
-    <Card>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#ef4444' }}>⚠️ Debts</h3><Button variant="secondary" size="sm" onClick={() => { setDebts([...debts, { creditor: '', type: '', amount: '' }]); setChanged(true); }}>+ Add</Button></div>
-      {debts.map((d, i) => <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: '12px', marginBottom: '12px', alignItems: 'end' }}><Input label="Creditor" value={d.creditor} onChange={e => { const u = [...debts]; u[i].creditor = e.target.value; setDebts(u); setChanged(true); }} placeholder="Mortgage" style={{ marginBottom: 0 }} /><Input label="Type" value={d.type} onChange={e => { const u = [...debts]; u[i].type = e.target.value; setDebts(u); setChanged(true); }} placeholder="Home Loan" style={{ marginBottom: 0 }} /><Input label="Amount" value={d.amount} onChange={e => { const u = [...debts]; u[i].amount = e.target.value; setDebts(u); setChanged(true); }} placeholder="$50,000" style={{ marginBottom: 0 }} /><Button variant="ghost" size="sm" onClick={() => { setDebts(debts.filter((_, j) => j !== i)); setChanged(true); }} style={{ color: '#ef4444' }}>🗑️</Button></div>)}
     </Card>
   </>;
 };
