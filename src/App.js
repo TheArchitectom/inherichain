@@ -9,6 +9,48 @@ const STRIPE_PAYMENT_LINK = 'https://buy.stripe.com/7sY3cw2x61nq9tQ17q9Zm00';
 const PLATFORM_FEE_PERCENT = 5;
 const STORAGE_KEY = 'inherichain_accounts';
 const SESSION_KEY = 'inherichain_session';
+const COINGECKO_API = 'https://api.coingecko.com/api/v3';
+
+// Tracked coins for portfolio
+const TRACKED_COINS = [
+  { id: 'bitcoin', name: 'Bitcoin', symbol: 'BTC' },
+  { id: 'ethereum', name: 'Ethereum', symbol: 'ETH' },
+  { id: 'solana', name: 'Solana', symbol: 'SOL' },
+  { id: 'chainlink', name: 'Chainlink', symbol: 'LINK' },
+  { id: 'quant-network', name: 'Quant', symbol: 'QNT' },
+  { id: 'bittensor', name: 'Bittensor', symbol: 'TAO' },
+  { id: 'kaspa', name: 'Kaspa', symbol: 'KAS' },
+  { id: 'polygon', name: 'Polygon', symbol: 'MATIC' },
+  { id: 'binancecoin', name: 'BNB', symbol: 'BNB' },
+  { id: 'avalanche-2', name: 'Avalanche', symbol: 'AVAX' },
+  { id: 'arbitrum', name: 'Arbitrum', symbol: 'ARB' },
+  { id: 'ripple', name: 'XRP', symbol: 'XRP' },
+  { id: 'cardano', name: 'Cardano', symbol: 'ADA' },
+];
+
+const SUPPORTED_CHAINS = [
+  { id: 'ethereum', name: 'Ethereum', symbol: 'ETH', icon: '⟠', explorer: 'https://etherscan.io' },
+  { id: 'bitcoin', name: 'Bitcoin', symbol: 'BTC', icon: '₿', explorer: 'https://blockchair.com/bitcoin' },
+  { id: 'solana', name: 'Solana', symbol: 'SOL', icon: '◎', explorer: 'https://solscan.io' },
+  { id: 'polygon', name: 'Polygon', symbol: 'MATIC', icon: '⬡', explorer: 'https://polygonscan.com' },
+  { id: 'binance', name: 'BNB Chain', symbol: 'BNB', icon: '⬡', explorer: 'https://bscscan.com' },
+  { id: 'arbitrum', name: 'Arbitrum', symbol: 'ARB', icon: '🔷', explorer: 'https://arbiscan.io' },
+];
+
+// Price Service with caching
+const PriceService = {
+  cache: {}, lastFetch: 0,
+  async getPrices() {
+    if (Date.now() - this.lastFetch < 60000 && Object.keys(this.cache).length > 0) return this.cache;
+    try {
+      const ids = TRACKED_COINS.map(c => c.id).join(',');
+      const res = await fetch(`${COINGECKO_API}/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
+      const data = await res.json();
+      this.cache = data; this.lastFetch = Date.now();
+      return data;
+    } catch { return this.cache; }
+  }
+};
 
 // ============================================
 // CRYPTO UTILITIES - AES-256 Encryption
@@ -215,7 +257,7 @@ const SignupPage = ({ onSignup, onLogin, onBeneficiary }) => {
     if (password !== confirm) { setError('Passwords don\'t match'); return; }
     setLoading(true);
     try {
-      const vault = { beneficiaries: [], crypto: { wallets: [], secrets: [], exchanges: [] }, passwords: [], documents: [], finance: { bankAccounts: [], investments: [], debts: [] }, messages: [], contacts: [], finalWishes: {}, settings: { checkInDays: 30, graceDays: 7, platformFee: PLATFORM_FEE_PERCENT }, createdAt: Date.now() };
+      const vault = { beneficiaries: [], portfolio: { holdings: [], wallets: [] }, crypto: { wallets: [], secrets: [], exchanges: [] }, passwords: [], documents: [], messages: [], contacts: [], finalWishes: {}, settings: { checkInDays: 30, graceDays: 7, platformFee: PLATFORM_FEE_PERCENT }, createdAt: Date.now() };
       const encrypted = await CryptoUtils.encrypt(vault, password);
       const account = { id: CryptoUtils.genId(), email: email.toLowerCase(), encryptedVault: encrypted, security: { totpEnabled: false, totpSecret: null, backupCodes: [] }, lastCheckIn: Date.now(), createdAt: Date.now() };
       Storage.saveAccount(email, account);
@@ -245,12 +287,23 @@ const SignupPage = ({ onSignup, onLogin, onBeneficiary }) => {
 // DASHBOARD - Main App Interface
 // ============================================
 const Dashboard = ({ account, vaultData, password, onLogout, onUpdate }) => {
-  const [tab, setTab] = useState('overview');
+  const [tab, setTab] = useState('portfolio');
   const [showSecurity, setShowSecurity] = useState(false);
   const [showExport, setShowExport] = useState(false);
+  const [showAddHolding, setShowAddHolding] = useState(false);
+  const [showAddWallet, setShowAddWallet] = useState(false);
   const [saving, setSaving] = useState(false);
   const [vault, setVault] = useState(vaultData);
   const [lastCheckIn, setLastCheckIn] = useState(account.lastCheckIn || Date.now());
+  const [prices, setPrices] = useState({});
+
+  // Fetch prices on mount and every 60s
+  useEffect(() => {
+    const fetchPrices = async () => { const p = await PriceService.getPrices(); setPrices(p); };
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   const save = useCallback(async (newVault) => {
     setSaving(true);
@@ -278,14 +331,13 @@ const Dashboard = ({ account, vaultData, password, onLogout, onUpdate }) => {
   const time = timeLeft();
 
   const tabs = [
-    { id: 'overview', icon: '📊', label: 'Overview' },
+    { id: 'portfolio', icon: '📊', label: 'Portfolio' },
     { id: 'beneficiaries', icon: '👥', label: 'Beneficiaries' },
-    { id: 'crypto', icon: '₿', label: 'Crypto' },
-    { id: 'passwords', icon: '🔑', label: 'Passwords' },
+    { id: 'wallets', icon: '👛', label: 'Wallets' },
+    { id: 'crypto', icon: '🔑', label: 'Secrets' },
+    { id: 'passwords', icon: '🔐', label: 'Passwords' },
     { id: 'documents', icon: '📄', label: 'Documents' },
-    { id: 'finance', icon: '🏦', label: 'Finance' },
     { id: 'messages', icon: '💌', label: 'Messages' },
-    { id: 'contacts', icon: '📞', label: 'Contacts' },
     { id: 'wishes', icon: '📝', label: 'Final Wishes' },
     { id: 'settings', icon: '⚙️', label: 'Settings' },
   ];
@@ -306,20 +358,21 @@ const Dashboard = ({ account, vaultData, password, onLogout, onUpdate }) => {
           {tabs.map(t => <button key={t.id} onClick={() => setTab(t.id)} style={{ width: '100%', padding: '12px 16px', marginBottom: '4px', background: tab === t.id ? 'rgba(139,92,246,0.15)' : 'transparent', border: 'none', borderRadius: '10px', color: tab === t.id ? '#a78bfa' : 'rgba(255,255,255,0.6)', fontSize: '13px', fontWeight: 500, textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '10px' }}><span>{t.icon}</span>{t.label}</button>)}
         </aside>
         <main style={{ flex: 1, padding: '32px 40px', overflow: 'auto' }}>
-          {tab === 'overview' && <OverviewTab vault={vault} account={account} time={time} onCheckIn={checkIn} onExport={() => setShowExport(true)} />}
+          {tab === 'portfolio' && <PortfolioTab vault={vault} prices={prices} time={time} onCheckIn={checkIn} onAddHolding={() => setShowAddHolding(true)} onSave={save} onExport={() => setShowExport(true)} />}
           {tab === 'beneficiaries' && <ListTab title="Beneficiaries" icon="👥" items={vault.beneficiaries || []} fields={[{ key: 'name', label: 'Name', placeholder: 'John Doe' }, { key: 'email', label: 'Email', placeholder: 'john@email.com' }, { key: 'share', label: 'Share %', placeholder: '100' }]} onSave={items => save({ ...vault, beneficiaries: items })} />}
+          {tab === 'wallets' && <WalletsTab vault={vault} onSave={save} onAddWallet={() => setShowAddWallet(true)} />}
           {tab === 'crypto' && <CryptoTab vault={vault} onSave={save} />}
-          {tab === 'passwords' && <ListTab title="Passwords" icon="🔑" items={vault.passwords || []} fields={[{ key: 'site', label: 'Website', placeholder: 'gmail.com' }, { key: 'username', label: 'Username', placeholder: 'user@...' }, { key: 'password', label: 'Password', placeholder: '••••••', secret: true }, { key: 'notes', label: 'Notes (2FA)', placeholder: '2FA info...' }]} onSave={items => save({ ...vault, passwords: items })} />}
+          {tab === 'passwords' && <ListTab title="Passwords" icon="🔐" items={vault.passwords || []} fields={[{ key: 'site', label: 'Website', placeholder: 'gmail.com' }, { key: 'username', label: 'Username', placeholder: 'user@...' }, { key: 'password', label: 'Password', placeholder: '••••••', secret: true }, { key: 'notes', label: 'Notes (2FA)', placeholder: '2FA info...' }]} onSave={items => save({ ...vault, passwords: items })} />}
           {tab === 'documents' && <ListTab title="Documents" icon="📄" items={vault.documents || []} fields={[{ key: 'name', label: 'Document', placeholder: 'Last Will' }, { key: 'type', label: 'Type', placeholder: 'Will/Trust/Insurance' }, { key: 'location', label: 'Location', placeholder: 'Safe deposit box...' }, { key: 'details', label: 'Details', placeholder: 'Notes...', textarea: true }]} onSave={items => save({ ...vault, documents: items })} />}
-          {tab === 'finance' && <FinanceTab vault={vault} onSave={save} />}
           {tab === 'messages' && <ListTab title="Final Messages" icon="💌" items={vault.messages || []} fields={[{ key: 'recipient', label: 'To', placeholder: 'Mom, Sarah...' }, { key: 'message', label: 'Message', placeholder: 'Your message...', textarea: true }]} onSave={items => save({ ...vault, messages: items })} pink />}
-          {tab === 'contacts' && <ListTab title="Key Contacts" icon="📞" items={vault.contacts || []} fields={[{ key: 'name', label: 'Name', placeholder: 'John Smith' }, { key: 'role', label: 'Role', placeholder: 'Attorney' }, { key: 'phone', label: 'Phone', placeholder: '+1...' }, { key: 'email', label: 'Email', placeholder: 'email@...' }]} onSave={items => save({ ...vault, contacts: items })} />}
           {tab === 'wishes' && <WishesTab vault={vault} onSave={save} />}
           {tab === 'settings' && <SettingsTab vault={vault} account={account} onSave={save} onShowSecurity={() => setShowSecurity(true)} />}
         </main>
       </div>
       <SecurityModal isOpen={showSecurity} onClose={() => setShowSecurity(false)} account={account} onUpdate={updated => { Storage.saveAccount(account.email, updated); onUpdate({ account: updated, vaultData: vault }); }} />
       <ExportModal isOpen={showExport} onClose={() => setShowExport(false)} account={account} />
+      <AddHoldingModal isOpen={showAddHolding} onClose={() => setShowAddHolding(false)} vault={vault} onSave={save} />
+      <AddWalletModal isOpen={showAddWallet} onClose={() => setShowAddWallet(false)} vault={vault} onSave={save} />
     </div>
   );
 };
@@ -327,24 +380,140 @@ const Dashboard = ({ account, vaultData, password, onLogout, onUpdate }) => {
 // ============================================
 // TABS
 // ============================================
-const OverviewTab = ({ vault, account, time, onCheckIn, onExport }) => {
-  const total = (vault.crypto?.wallets?.length || 0) + (vault.passwords?.length || 0) + (vault.documents?.length || 0) + (vault.messages?.length || 0) + (vault.contacts?.length || 0);
+const formatUSD = (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: n > 1000 ? 0 : 2 }).format(n);
+
+const PortfolioTab = ({ vault, prices, time, onCheckIn, onAddHolding, onSave, onExport }) => {
+  const holdings = vault.portfolio?.holdings || [];
+  
+  const calcValue = () => {
+    let total = 0;
+    holdings.forEach(h => { const price = prices[h.coinId]?.usd || 0; total += (h.amount || 0) * price; });
+    return total;
+  };
+  const portfolioValue = calcValue();
+
+  const removeHolding = (i) => { 
+    const newH = holdings.filter((_, idx) => idx !== i); 
+    onSave({ ...vault, portfolio: { ...vault.portfolio, holdings: newH } }); 
+  };
+
   return <>
+    {/* Check-in Card */}
     <Card glow={time.urgent ? '#ef4444' : '#10b981'} style={{ marginBottom: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '20px' }}>
         <div>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 16px', borderRadius: '100px', background: time.urgent ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)', marginBottom: '16px' }}><span>{time.urgent ? '⚠️' : '🛡️'}</span><span style={{ fontSize: '12px', fontWeight: 600, color: time.urgent ? '#ef4444' : '#10b981' }}>{time.urgent ? 'ACTION REQUIRED' : 'PROTECTED'}</span></div>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 16px', borderRadius: '100px', background: time.urgent ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)', marginBottom: '16px' }}><span>{time.urgent ? '⚠️' : '🛡️'}</span><span style={{ fontSize: '12px', fontWeight: 600, color: time.urgent ? '#ef4444' : '#10b981' }}>{time.urgent ? 'CHECK-IN REQUIRED' : 'PROTECTED'}</span></div>
           <h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>Your Legacy is {time.urgent ? 'At Risk' : 'Secure'}</h2>
           <p style={{ color: 'rgba(255,255,255,0.5)' }}>Next check-in: <strong style={{ color: '#fff' }}>{time.text}</strong></p>
         </div>
         <Button variant={time.urgent ? 'danger' : 'primary'} size="lg" onClick={onCheckIn}>✓ Check In</Button>
       </div>
     </Card>
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '16px', marginBottom: '24px' }}>
-      {[{ l: 'Items', v: total, i: '📦' }, { l: 'Beneficiaries', v: vault.beneficiaries?.length || 0, i: '👥' }, { l: 'Check-in', v: `${vault.settings?.checkInDays || 30}d`, i: '⏰' }, { l: '2FA', v: account.security?.totpEnabled ? 'On' : 'Off', i: '🔐' }].map((s, i) => <Card key={i} style={{ padding: '20px', textAlign: 'center' }}><div style={{ fontSize: '24px', marginBottom: '8px' }}>{s.i}</div><div style={{ fontSize: '20px', fontWeight: 700, color: '#fff' }}>{s.v}</div><div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>{s.l}</div></Card>)}
+
+    {/* Stats */}
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '16px', marginBottom: '24px' }}>
+      <Card style={{ padding: '20px', textAlign: 'center' }}><div style={{ fontSize: '24px', marginBottom: '8px' }}>💰</div><div style={{ fontSize: '22px', fontWeight: 700, color: '#a78bfa' }}>{formatUSD(portfolioValue)}</div><div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>Portfolio Value</div></Card>
+      <Card style={{ padding: '20px', textAlign: 'center' }}><div style={{ fontSize: '24px', marginBottom: '8px' }}>🪙</div><div style={{ fontSize: '22px', fontWeight: 700, color: '#fff' }}>{holdings.length}</div><div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>Assets Tracked</div></Card>
+      <Card style={{ padding: '20px', textAlign: 'center' }}><div style={{ fontSize: '24px', marginBottom: '8px' }}>👥</div><div style={{ fontSize: '22px', fontWeight: 700, color: '#fff' }}>{vault.beneficiaries?.length || 0}</div><div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>Beneficiaries</div></Card>
+      <Card style={{ padding: '20px', textAlign: 'center' }}><div style={{ fontSize: '24px', marginBottom: '8px' }}>👛</div><div style={{ fontSize: '22px', fontWeight: 700, color: '#fff' }}>{vault.portfolio?.wallets?.length || 0}</div><div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>Wallets</div></Card>
     </div>
+
+    {/* Holdings */}
+    <Card style={{ marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', margin: 0 }}>💎 Holdings (Real-time Prices)</h3><Button variant="secondary" size="sm" onClick={onAddHolding}>+ Add Asset</Button></div>
+      {holdings.length === 0 ? <div style={{ textAlign: 'center', padding: '40px', color: 'rgba(255,255,255,0.4)' }}><div style={{ fontSize: '40px', marginBottom: '12px' }}>📊</div><p style={{ marginBottom: '16px' }}>No assets tracked yet</p><Button size="sm" onClick={onAddHolding}>Add Your First Asset</Button></div> : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {holdings.map((h, i) => {
+            const price = prices[h.coinId]?.usd || 0;
+            const change = prices[h.coinId]?.usd_24h_change || 0;
+            const value = (h.amount || 0) * price;
+            return (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto', gap: '16px', alignItems: 'center', padding: '14px', background: 'rgba(255,255,255,0.02)', borderRadius: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}><div style={{ width: '36px', height: '36px', borderRadius: '50%', background: 'linear-gradient(135deg,#8b5cf6,#06b6d4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', fontWeight: 700, color: '#fff' }}>{h.symbol?.charAt(0) || '?'}</div><div><div style={{ fontWeight: 600, color: '#fff', fontSize: '14px' }}>{h.name}</div><div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>{h.symbol}</div></div></div>
+                <div style={{ textAlign: 'right' }}><div style={{ fontWeight: 600, color: '#fff', fontSize: '14px' }}>{h.amount}</div><div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>{h.symbol}</div></div>
+                <div style={{ textAlign: 'right' }}><div style={{ fontWeight: 600, color: '#fff', fontSize: '14px' }}>{formatUSD(price)}</div><div style={{ fontSize: '12px', color: change >= 0 ? '#10b981' : '#ef4444' }}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</div></div>
+                <div style={{ textAlign: 'right' }}><div style={{ fontWeight: 700, color: '#a78bfa', fontSize: '14px' }}>{formatUSD(value)}</div></div>
+                <button onClick={() => removeHolding(i)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '16px', padding: '8px' }}>×</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+
+    {/* Quick Actions */}
     <Card><h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginBottom: '16px' }}>Quick Actions</h3><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}><Button variant="secondary" fullWidth onClick={onExport}>📥 Export Backup</Button><Button variant="secondary" fullWidth onClick={() => window.open(STRIPE_PAYMENT_LINK, '_blank')}>💳 Subscription</Button></div></Card>
   </>;
+};
+
+const WalletsTab = ({ vault, onSave, onAddWallet }) => {
+  const wallets = vault.portfolio?.wallets || [];
+  const [show, setShow] = useState({});
+  const removeWallet = (i) => { const newW = wallets.filter((_, idx) => idx !== i); onSave({ ...vault, portfolio: { ...vault.portfolio, wallets: newW } }); };
+
+  return <>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}><h2 style={{ fontSize: '24px', fontWeight: 700, color: '#fff', margin: 0 }}>👛 Wallet Addresses</h2><Button variant="secondary" onClick={onAddWallet}>+ Add Wallet</Button></div>
+    <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '13px', marginBottom: '24px' }}>Track wallet addresses across chains. View-only - your private keys stay safe.</p>
+    {wallets.length === 0 ? <Card style={{ textAlign: 'center', padding: '60px' }}><div style={{ fontSize: '48px', marginBottom: '16px' }}>👛</div><p style={{ color: 'rgba(255,255,255,0.5)', marginBottom: '20px' }}>No wallets added yet</p><Button onClick={onAddWallet}>Add Your First Wallet</Button></Card> : (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {wallets.map((w, i) => {
+          const chain = SUPPORTED_CHAINS.find(c => c.id === w.chain) || SUPPORTED_CHAINS[0];
+          return (
+            <Card key={i} style={{ padding: '20px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}><div style={{ width: '40px', height: '40px', borderRadius: '12px', background: 'rgba(139,92,246,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '20px' }}>{chain.icon}</div><div><div style={{ fontWeight: 600, color: '#fff', fontSize: '15px' }}>{w.name || 'Wallet'}</div><div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)' }}>{chain.name}</div></div></div>
+                <div style={{ display: 'flex', gap: '8px' }}><a href={`${chain.explorer}/address/${w.address}`} target="_blank" rel="noopener noreferrer" style={{ color: '#a78bfa', fontSize: '12px', textDecoration: 'none' }}>View ↗</a><button onClick={() => removeWallet(i)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '14px' }}>×</button></div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><code style={{ flex: 1, padding: '12px', background: 'rgba(0,0,0,0.3)', borderRadius: '8px', fontSize: '12px', color: show[i] ? '#a78bfa' : 'rgba(255,255,255,0.3)', wordBreak: 'break-all' }}>{show[i] ? w.address : w.address?.slice(0, 10) + '...' + w.address?.slice(-8)}</code><Button variant="ghost" size="sm" onClick={() => setShow({ ...show, [i]: !show[i] })}>{show[i] ? '🙈' : '👁️'}</Button><Button variant="ghost" size="sm" onClick={() => navigator.clipboard.writeText(w.address)}>📋</Button></div>
+            </Card>
+          );
+        })}
+      </div>
+    )}
+  </>;
+};
+
+const AddHoldingModal = ({ isOpen, onClose, vault, onSave }) => {
+  const [coin, setCoin] = useState('bitcoin');
+  const [amount, setAmount] = useState('');
+
+  const add = () => {
+    if (!amount || parseFloat(amount) <= 0) return;
+    const c = TRACKED_COINS.find(x => x.id === coin);
+    const holding = { coinId: c.id, name: c.name, symbol: c.symbol, amount: parseFloat(amount) };
+    const holdings = [...(vault.portfolio?.holdings || []), holding];
+    onSave({ ...vault, portfolio: { ...vault.portfolio, holdings } });
+    setAmount(''); setCoin('bitcoin'); onClose();
+  };
+
+  if (!isOpen) return null;
+  return <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}><div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)' }} onClick={onClose} /><Card style={{ position: 'relative', maxWidth: '450px', width: '100%' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}><h2 style={{ fontSize: '18px', fontWeight: 700, color: '#fff' }}>Add Asset to Portfolio</h2><button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: '24px', cursor: 'pointer' }}>×</button></div>
+    <div style={{ marginBottom: '16px' }}><label style={{ display: 'block', fontSize: '11px', color: 'rgba(167,139,250,0.8)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: '8px', fontWeight: 600 }}>Select Asset</label><select value={coin} onChange={e => setCoin(e.target.value)} style={{ width: '100%', padding: '14px 18px', background: '#0a0a0f', border: '2px solid rgba(255,255,255,0.1)', borderRadius: '12px', color: '#fff', fontSize: '14px', outline: 'none' }}>{TRACKED_COINS.map(c => <option key={c.id} value={c.id} style={{ background: '#0f0a1a' }}>{c.symbol} - {c.name}</option>)}</select></div>
+    <Input label="Amount" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" />
+    <Button fullWidth onClick={add}>Add to Portfolio</Button>
+  </Card></div>;
+};
+
+const AddWalletModal = ({ isOpen, onClose, vault, onSave }) => {
+  const [name, setName] = useState('');
+  const [address, setAddress] = useState('');
+  const [chain, setChain] = useState('ethereum');
+
+  const add = () => {
+    if (!address) return;
+    const wallet = { name, address, chain, createdAt: Date.now() };
+    const wallets = [...(vault.portfolio?.wallets || []), wallet];
+    onSave({ ...vault, portfolio: { ...vault.portfolio, wallets } });
+    setName(''); setAddress(''); setChain('ethereum'); onClose();
+  };
+
+  if (!isOpen) return null;
+  return <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}><div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)' }} onClick={onClose} /><Card style={{ position: 'relative', maxWidth: '450px', width: '100%' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}><h2 style={{ fontSize: '18px', fontWeight: 700, color: '#fff' }}>Add Wallet Address</h2><button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: '24px', cursor: 'pointer' }}>×</button></div>
+    <Input label="Wallet Name" value={name} onChange={e => setName(e.target.value)} placeholder="Main Ledger" />
+    <div style={{ marginBottom: '16px' }}><label style={{ display: 'block', fontSize: '11px', color: 'rgba(167,139,250,0.8)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: '8px', fontWeight: 600 }}>Blockchain</label><select value={chain} onChange={e => setChain(e.target.value)} style={{ width: '100%', padding: '14px 18px', background: '#0a0a0f', border: '2px solid rgba(255,255,255,0.1)', borderRadius: '12px', color: '#fff', fontSize: '14px', outline: 'none' }}>{SUPPORTED_CHAINS.map(c => <option key={c.id} value={c.id} style={{ background: '#0f0a1a' }}>{c.icon} {c.name}</option>)}</select></div>
+    <Input label="Wallet Address" value={address} onChange={e => setAddress(e.target.value)} placeholder="0x..." />
+    <Button fullWidth onClick={add}>Add Wallet</Button>
+  </Card></div>;
 };
 
 const ListTab = ({ title, icon, items: initial, fields, onSave, pink }) => {
@@ -590,10 +759,60 @@ const BeneficiaryPage = ({ onBack }) => {
 };
 
 // ============================================
+// LANDING PAGE
+// ============================================
+const LandingPage = ({ onCreateVault, onBeneficiary }) => {
+  return (
+    <div style={{ position: 'relative', zIndex: 1, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <header style={{ padding: '24px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Logo />
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <Button variant="ghost" onClick={onBeneficiary}>I'm a Beneficiary</Button>
+          <Button variant="secondary" onClick={onCreateVault}>Login</Button>
+        </div>
+      </header>
+      <main style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
+        <div style={{ textAlign: 'center', maxWidth: '800px' }}>
+          <div style={{ marginBottom: '24px' }}>
+            <span style={{ background: 'rgba(139,92,246,0.15)', color: '#a78bfa', padding: '8px 16px', borderRadius: '100px', fontSize: '12px', fontWeight: 600, letterSpacing: '0.1em' }}>SECURE DIGITAL INHERITANCE</span>
+          </div>
+          <h1 style={{ fontSize: 'clamp(36px, 6vw, 64px)', fontWeight: 800, lineHeight: 1.1, marginBottom: '24px' }}>
+            <span style={{ background: 'linear-gradient(135deg, #fff 0%, #a78bfa 50%, #06b6d4 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Your Crypto Legacy,</span>
+            <br />
+            <span style={{ color: '#fff' }}>Protected Forever</span>
+          </h1>
+          <p style={{ fontSize: '18px', color: 'rgba(255,255,255,0.6)', maxWidth: '600px', margin: '0 auto 40px', lineHeight: 1.7 }}>
+            Ensure your cryptocurrency, passwords, and digital assets reach your loved ones. 
+            Client-side encrypted. No custody. No KYC. Your keys, your rules.
+          </p>
+          <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <Button onClick={onCreateVault} style={{ padding: '18px 36px', fontSize: '14px' }}>Create Your Vault →</Button>
+            <Button variant="secondary" onClick={onBeneficiary} style={{ padding: '18px 36px', fontSize: '14px' }}>Claim Inheritance</Button>
+          </div>
+          <div style={{ marginTop: '60px', display: 'flex', justifyContent: 'center', gap: '40px', flexWrap: 'wrap' }}>
+            {[
+              { icon: '🔐', title: 'AES-256 Encrypted', desc: 'Military-grade encryption' },
+              { icon: '👁️', title: 'Zero Knowledge', desc: 'We never see your data' },
+              { icon: '⏰', title: 'Dead Man\'s Switch', desc: 'Auto-release to beneficiaries' },
+            ].map((f, i) => (
+              <div key={i} style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '32px', marginBottom: '12px' }}>{f.icon}</div>
+                <div style={{ fontWeight: 600, color: '#fff', marginBottom: '4px' }}>{f.title}</div>
+                <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.5)' }}>{f.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+};
+
+// ============================================
 // MAIN APP
 // ============================================
 export default function App() {
-  const [page, setPage] = useState('login');
+  const [page, setPage] = useState('landing');
   const [account, setAccount] = useState(null);
   const [vaultData, setVaultData] = useState(null);
   const [password, setPassword] = useState('');
@@ -604,7 +823,6 @@ export default function App() {
     if (session?.email) {
       const acc = Storage.getAccount(session.email);
       if (acc) {
-        // User has session but needs to login again for password
         setPage('login');
       }
     }
@@ -622,7 +840,7 @@ export default function App() {
     setAccount(null);
     setVaultData(null);
     setPassword('');
-    setPage('login');
+    setPage('landing');
   };
 
   const handleUpdate = ({ account: acc, vaultData: vault }) => {
@@ -633,10 +851,11 @@ export default function App() {
   return (
     <div style={{ minHeight: '100vh', fontFamily: 'Inter,-apple-system,sans-serif', color: '#fff' }}>
       <Background />
+      {page === 'landing' && <LandingPage onCreateVault={() => setPage('signup')} onBeneficiary={() => setPage('beneficiary')} />}
       {page === 'login' && <LoginPage onLogin={handleLogin} onSignup={() => setPage('signup')} onBeneficiary={() => setPage('beneficiary')} />}
       {page === 'signup' && <SignupPage onSignup={handleLogin} onLogin={() => setPage('login')} onBeneficiary={() => setPage('beneficiary')} />}
       {page === 'dashboard' && account && <Dashboard account={account} vaultData={vaultData} password={password} onLogout={handleLogout} onUpdate={handleUpdate} />}
-      {page === 'beneficiary' && <BeneficiaryPage onBack={() => setPage('login')} />}
+      {page === 'beneficiary' && <BeneficiaryPage onBack={() => setPage('landing')} />}
     </div>
   );
 }
